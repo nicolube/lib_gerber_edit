@@ -9,6 +9,8 @@ use std::io::BufReader;
 const CHAR_SIZE: u8 = 94;
 const TEXT_HEIGHT: f64 = 9.6577;
 
+
+/// Loads font from gerber file
 fn load_ascii() -> Vec<Vec<Command>> {
     let raw = include_str!("gerber/kicad_font.gbr");
     let reader = BufReader::new(raw.as_bytes());
@@ -51,6 +53,7 @@ fn load_ascii() -> Vec<Vec<Command>> {
     chars
 }
 
+/// Generates gerber commands for given text and size into a new gerber layer
 pub fn write_ascii<T>(txt: T, size: f64, layer_type: LayerType) -> GerberLayerData
 where
     T: AsRef<str>,

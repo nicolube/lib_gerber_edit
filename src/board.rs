@@ -5,11 +5,17 @@ use std::path::Path;
 use gerber_parser::gerber_types::{Command, CommentContent, FunctionCode, GCode, GerberResult};
 use crate::{error, excellon_format, LayerCorners, LayerMerge, LayerTransform, Pos};
 use crate::layer::{Layer, LayerData, LayerType};
-
+/// Board, a collection of layers of any type
 #[derive(Debug, Clone, PartialEq)]
 pub struct Board(Vec<Layer>);
 
 impl Board {
+
+    /// Loads board from a Vec of layers file-name and a reader of the files data
+    ///
+    /// Layer type will be evaluated from file extension.
+    /// If gerber layer type cannot be evaluated by file extension, type will be read from
+    /// gerber FileAttribute.
     pub fn new(data: Vec<(&str, BufReader<&mut dyn Read>)>) -> crate::Result<Self> {
         let mut result = Vec::new();
         for (name, reader) in data {
@@ -30,10 +36,12 @@ impl Board {
         Ok(Self(result))
     }
 
+    /// Returns an empty layer
     pub fn empty() -> Self {
         Self(Vec::new())
     }
 
+    /// Adds a comment to all layers
     pub fn comment(&mut self, txt: String) {
         for layer in self.0.iter_mut() {
             match &mut layer.data {
@@ -51,6 +59,7 @@ impl Board {
         }
     }
 
+    /// Loads all layers it can from a given folder
     pub fn from_folder(path: &Path) -> crate::Result<Self> {
         let folder = fs::read_dir(path)?;
         let mut files = folder
@@ -79,24 +88,12 @@ impl Board {
         Self::new(reader)
     }
 
-    pub fn write_to<T>(
-        &self,
-        f: &mut impl FnMut(&Layer) -> std::io::Result<BufWriter<T>>,
-    ) -> GerberResult<()>
-    where
-        T: Write,
-    {
-        for layer in &self.0 {
-            let mut writer = f(layer)?;
-            layer.data.write_to(&mut writer)?;
-        }
-        Ok(())
-    }
-
+    /// Returns inner lasers
     pub fn layers(&self) -> Vec<&Layer> {
         self.0.iter().collect()
     }
 
+    /// Returns inner lasers mutable
     pub fn layers_mut(&mut self) -> Vec<&mut Layer> {
         self.0.iter_mut().collect()
     }
@@ -111,14 +108,34 @@ impl Board {
         }
     }
 
+    /// Returns a given layer by its type
     pub fn get_layer(&self, ty: &LayerType) -> Option<&Layer> {
         self.0.iter().find(|layer| &layer.ty == ty)
     }
 
+    /// Returns a given layer by its type mutbale
     pub fn get_layer_mut(&mut self, ty: &LayerType) -> Option<&mut Layer> {
         self.0.iter_mut().find(|layer| &layer.ty == ty)
     }
 
+    /// Writes layers to a given output
+    ///
+    /// @see Self::write_to_folder for an example
+    pub fn write_to<T>(
+        &self,
+        f: &mut impl FnMut(&Layer) -> std::io::Result<BufWriter<T>>,
+    ) -> GerberResult<()>
+    where
+        T: Write,
+    {
+        for layer in &self.0 {
+            let mut writer = f(layer)?;
+            layer.data.write_to(&mut writer)?;
+        }
+        Ok(())
+    }
+
+    /// Writes layers to a given folder
     pub fn write_to_folder(&self, path: &Path) -> GerberResult<()> {
         fs::create_dir_all(path)?;
         let mut name_fn = |x: &Layer| {
@@ -130,6 +147,10 @@ impl Board {
 }
 
 impl LayerCorners for Board {
+
+    /// Returns corners of board
+    ///
+    /// Will get them by getting min and max coords of each layer
     fn get_corners(&self) -> (Pos, Pos) {
         let mut min = Pos {
             x: f64::MAX,
@@ -161,6 +182,8 @@ impl LayerCorners for Board {
 }
 
 impl LayerTransform for Board {
+
+    /// Adds an offset to all layers
     fn transform(&mut self, transform: &Pos) {
         for layer in &mut self.0 {
             layer.data.transform(transform);
@@ -169,6 +192,8 @@ impl LayerTransform for Board {
 }
 
 impl LayerMerge for Board {
+
+    /// Will merge all layers of same type else it will insert the layer
     fn merge(&mut self, other: &Self) {
         for layer in &mut self.0 {
             other

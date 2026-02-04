@@ -10,6 +10,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use crate::gerber_types::InterpolationMode;
 use crate::unit_able::UnitAble;
 
+/// And gerber layer file separated into its components
 #[derive(Debug, Clone, PartialEq)]
 pub struct GerberLayerData {
     pub layer_type: LayerType,
@@ -21,6 +22,8 @@ pub struct GerberLayerData {
 }
 
 impl GerberLayerData {
+
+    /// Creates a new layer from already loaded gerber doc and its layer type
     pub fn new(ty: LayerType, data: GerberDoc) -> Result<Self, ParseError> {
         for command in &data.commands {
             if let Err(err) = command {
@@ -67,6 +70,8 @@ impl GerberLayerData {
             .cloned()
             .collect();
 
+        let ty = LayerType::from_commands(&commands).unwrap_or(ty);
+
         Ok(Self {
             unit: data.units.unwrap_or(Unit::Millimeters),
             coordinate_format: data.format_specification.unwrap(),
@@ -77,6 +82,7 @@ impl GerberLayerData {
         }.to_unit(&Unit::Millimeters))
     }
 
+    /// Parses GerberLayer from reader with given type
     pub fn from_type<R>(ty: LayerType, reader: BufReader<R>) -> Result<Self, ParseError>
     where
         R: Read,
@@ -85,18 +91,20 @@ impl GerberLayerData {
         Self::new(ty, data)
     }
 
+    /// Parses GerberLayer from reader, type will load from FileAttribute
     pub fn from_commands<R>(reader: BufReader<R>) -> Result<Self, ParseError>
     where
         R: Read,
     {
         let data = gerber_parser::parse(reader).map_err(|(_, err)| err)?;
 
-        let layer_type = LayerType::try_from(&data.commands())
-            .map_err(|e| ParseError::IoError(format!("Failed to find type: {}", e)))?;
+        let layer_type = LayerType::from_commands(data.commands())
+            .ok_or(ParseError::IoError("Type not found in file attributes".to_string()))?;
 
         Self::new(layer_type, data)
     }
 
+    /// Creates an empty gerber layer
     pub fn empty(layer_type: LayerType) -> Self {
         Self {
             coordinate_format: CoordinateFormat::new(ZeroOmission::Leading, CoordinateMode::Absolute, 4, 6),
@@ -108,10 +116,12 @@ impl GerberLayerData {
         }
     }
 
+    /// Checks if layer is empty
     pub fn is_empty(&self) -> bool {
         self.commands.is_empty()
     }
 
+    /// Converts all commands to given Unit
     pub fn to_unit(mut self, unit: &Unit) -> Self {
         if unit == &self.unit {
             return self;
@@ -155,6 +165,7 @@ impl GerberLayerData {
         self
     }
 
+    /// Converts Layer to just a set of commands
     fn to_commands(&self) -> Vec<Command> {
         let mut commands = vec![
             Command::FunctionCode(FunctionCode::GCode(GCode::Comment(CommentContent::String(
@@ -183,7 +194,7 @@ impl GerberLayerData {
             )),
             Command::ExtendedCode(ExtendedCode::LoadPolarity(Polarity::Dark)),
             Command::ExtendedCode(ExtendedCode::ImageName(ImageName {
-                name: self.layer_type.file_ending(),
+                name: self.layer_type.file_ending().to_string(),
             })),
         ]);
 
@@ -223,6 +234,7 @@ impl GerberLayerData {
         commands
     }
 
+    /// Writes to given output
     pub fn write_to<T>(&self, writer: &mut BufWriter<T>) -> GerberResult<()>
     where
         T: Write,

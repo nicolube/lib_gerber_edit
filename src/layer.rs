@@ -118,6 +118,10 @@ impl LayerStepAndRepeat for LayerData {
     }
 }
 
+/// Layer Type
+///
+/// All Layers except Drill are usually gerber layers
+/// The grill layer is a excellon drill file
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LayerType {
     Top,
@@ -170,38 +174,39 @@ impl TryFrom<&str> for LayerType {
     }
 }
 
-impl TryFrom<&Vec<&Command>> for LayerType {
-    type Error = String;
+impl LayerType {
 
-    fn try_from(value: &Vec<&Command>) -> result::Result<Self, Self::Error> {
-        let command = value
-            .iter()
-            .find_map(|c| match c {
-                Command::ExtendedCode(ExtendedCode::FileAttribute(
+    /// Searches for a matching FileAttribute in a set of commands
+    pub fn from_commands<'a, I: IntoIterator<Item = &'a Command>>(value: I) -> Option<Self> {
+        let mut iter = value.into_iter();
+        iter.find_map(|c| match c {
+            Command::ExtendedCode(ExtendedCode::FileAttribute(FileAttribute::FileFunction(
+                file_function,
+            ))) => Some(file_function),
+            Command::FunctionCode(FunctionCode::GCode(GCode::Comment(
+                CommentContent::Standard(StandardComment::FileAttribute(
                     FileAttribute::FileFunction(file_function),
-                )) => Some(file_function),
-                Command::FunctionCode(FunctionCode::GCode(GCode::Comment(
-                    CommentContent::Standard(StandardComment::FileAttribute(
-                        FileAttribute::FileFunction(file_function),
-                    )),
-                ))) => Some(file_function),
-                _ => None,
-            })
-            .ok_or("No file function found")?;
-        Ok(LayerType::layer_type(command))
+                )),
+            ))) => Some(file_function),
+            _ => None,
+        })
+        .map(LayerType::layer_type)
     }
 }
 
 impl LayerType {
-    pub fn file_ending(&self) -> String {
+
+    /// Returns the default extensional
+    pub const fn file_ending(&self) -> &'static str {
         match self {
-            LayerType::Info => "txt".to_string(),
-            LayerType::Drill => "drl".to_string(),
-            LayerType::UndefinedGerber => "gbr".to_string(),
-            _ => "gbr".to_string(),
+            LayerType::Info => "txt",
+            LayerType::Drill => "drl",
+            LayerType::UndefinedGerber => "gbr",
+            _ => "gbr"
         }
     }
 
+    /// Converts FileFunction to matching LayerType
     pub fn layer_type(file_function: &FileFunction) -> LayerType {
         match file_function {
             FileFunction::Copper {
@@ -247,6 +252,7 @@ impl LayerType {
         }
     }
 
+    /// Converts LayerType to matching FileFunction
     pub fn function(&self) -> FileFunction {
         match self {
             LayerType::Top => FileFunction::Copper {
@@ -319,7 +325,6 @@ impl Display for LayerType {
         Ok(())
     }
 }
-
 
 impl From<Layer> for LayerData {
     fn from(layer: Layer) -> Self {

@@ -1,18 +1,23 @@
 use gerber_parser::gerber_types::{Aperture, ApertureDefinition, ApertureMacro, Command, CoordinateNumber, DCode, ExtendedCode, FunctionCode, MacroContent, MacroDecimal, Operation, StepAndRepeat, Unit};
 use crate::Size;
 
+/// A trait that allows conversion between mm and in
 pub(crate) trait UnitAble
 where
     Self: Sized,
 {
+    /// Converts known mm to given Unit
     fn mm_to_unit(&self, unit: &Unit) -> Self;
 
+    /// Converts from given unit to mm
     fn to_mm(&self, unit: &Unit) -> Self;
 
+    /// Converts from given unit to a given unit
     fn to_unit(&self, from: &Unit, to: &Unit) -> Self {
         self.to_mm(from).mm_to_unit(to)
     }
 
+    /// Converts from given unit to a given unit and stores it into current struct
     fn convert_unit_self(&mut self, from: &Unit, to: &Unit) {
         *self = self.to_unit(from, to);
     }
