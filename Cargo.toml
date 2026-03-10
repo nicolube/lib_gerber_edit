@@ -3,13 +3,17 @@ name = "lib_gerber_edit"
 description = "A libary for manipululating extended gerber data (RS-274X)"
 repository = "https://github.com/nicolube/lib_gerber_edit"
 license-file = "LICENSE"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 
 [dependencies]
 gerber_parser = "0.4.0"
-lazy_static = "1.5.0"
+lazy_static = "1.5"
 derive_more = { version = "2.1.1", features = ["display", "error"]}
-thiserror = "2.0.16"
-serde = { version = "1.0.228", features = ["derive"] }
-chrono = "0.4.42"
+thiserror = "2.0"
+serde = { version = "1.0.228", features = ["derive"], optional = true}
+chrono = "0.4"
+
+[features]
+default = ["serde"]
+serde = [ "dep:serde" ]

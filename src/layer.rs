@@ -6,10 +6,12 @@ use gerber_parser::gerber_types::{
     Command, CommentContent, ExtendedCode, ExtendedPosition, FileAttribute, FileFunction,
     FunctionCode, GCode, GerberResult, Position, Profile, StandardComment,
 };
-use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::result;
+
+#[cfg(feature = "serde")]
+use ::serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LayerData {
@@ -122,7 +124,8 @@ impl LayerStepAndRepeat for LayerData {
 ///
 /// All Layers except Drill are usually gerber layers
 /// The grill layer is a excellon drill file
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum LayerType {
     Top,
     Bottom,
@@ -175,7 +178,6 @@ impl TryFrom<&str> for LayerType {
 }
 
 impl LayerType {
-
     /// Searches for a matching FileAttribute in a set of commands
     pub fn from_commands<'a, I: IntoIterator<Item = &'a Command>>(value: I) -> Option<Self> {
         let mut iter = value.into_iter();
@@ -195,14 +197,13 @@ impl LayerType {
 }
 
 impl LayerType {
-
     /// Returns the default extensional
     pub const fn file_ending(&self) -> &'static str {
         match self {
             LayerType::Info => "txt",
             LayerType::Drill => "drl",
             LayerType::UndefinedGerber => "gbr",
-            _ => "gbr"
+            _ => "gbr",
         }
     }
 
@@ -335,5 +336,42 @@ impl From<Layer> for LayerData {
 impl From<&Layer> for LayerData {
     fn from(layer: &Layer) -> Self {
         layer.data.clone()
+    }
+}
+
+#[cfg(feature = "serde")]
+mod serde {
+    use crate::layer::{Layer, LayerData};
+    use serde::ser::{Error, SerializeStruct};
+    use serde::{Serialize, Serializer};
+    use std::io::BufWriter;
+
+    impl Serialize for LayerData {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            let mut writer = BufWriter::new(Vec::new());
+            self.write_to(&mut writer).unwrap();
+            serializer.serialize_bytes(
+                writer
+                    .into_inner()
+                    .map_err(|err| S::Error::custom(err))?
+                    .as_slice(),
+            )
+        }
+    }
+    impl Serialize for Layer {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: Serializer,
+        {
+            let mut str = serializer.serialize_struct("Layer", 4)?;
+            str.serialize_field("name", &self.name)?;
+            str.serialize_field("type", &self.ty)?;
+            str.serialize_field("file_type", &self.ty.file_ending())?;
+            str.serialize_field("data", &self.data)?;
+            str.end()
+        }
     }
 }

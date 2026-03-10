@@ -11,7 +11,10 @@ pub use gerber_parser::gerber_types;
 
 use crate::layer::{LayerData, LayerType};
 use derive_more::Display;
+
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
+
 pub type Result<T> = std::result::Result<T, error::Error>;
 
 pub trait LayerCorners {
@@ -53,16 +56,18 @@ pub trait LayerStepAndRepeat {
 }
 
 /// Position in mm
-#[derive(Debug, Clone, PartialEq, Display, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Display)]
 #[display("x: {x:.2}, y: {y:.2}")]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Pos {
     pub x: f64,
     pub y: f64,
 }
 
 /// Size in mm
-#[derive(Debug, Clone, PartialEq, Display, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Display)]
 #[display("width: {width:.2}, height: {height:.2}")]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Size {
     pub width: f64,
     pub height: f64,
