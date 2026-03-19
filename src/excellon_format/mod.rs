@@ -1,4 +1,5 @@
 use crate::excellon_format::Mode::Route;
+use crate::unit_able::UnitAble;
 use crate::{LayerData, LayerMerge, LayerStepAndRepeat, LayerTransform, Pos};
 use derive_more::{Display, Error};
 use gerber_parser::gerber_types::Unit;
@@ -7,7 +8,6 @@ use std::fmt::{Display, Formatter};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::num::{ParseFloatError, ParseIntError};
 use std::str::FromStr;
-use crate::unit_able::UnitAble;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExcellonLayerData {
@@ -48,18 +48,16 @@ impl ExcellonLayerData {
         }
 
         write!(writer, "{}", header_end)?;
-        for command in &self.commands {
-            match command {
-                Ok(command) => {
-                    writer.write(command.to_string().as_bytes())?;
-                }
-                Err(_) => {}
-            }
+        for command in self.commands.iter().flatten() {
+            writer.write_all(command.to_string().as_bytes())?;
         }
         Ok(())
     }
     pub fn is_empty(&self) -> bool {
-        !self.commands.iter().any(|x| matches!(x, Ok(Command::Coordinate(_, _, _))))
+        !self
+            .commands
+            .iter()
+            .any(|x| matches!(x, Ok(Command::Coordinate(_, _, _))))
     }
 }
 
@@ -68,8 +66,8 @@ impl LayerTransform for ExcellonLayerData {
         let mut commands = Vec::new();
         commands.extend(self.header.iter_mut().filter_map(|x| x.as_mut().ok()));
         commands.extend(self.commands.iter_mut().filter_map(|x| x.as_mut().ok()));
-        commands.iter_mut().for_each(|cmd| match cmd {
-            Command::Coordinate(x, y, fmt) => {
+        commands.iter_mut().for_each(|cmd| {
+            if let Command::Coordinate(x, y, fmt) = cmd {
                 *x = x
                     .to_mm(&fmt.unit)
                     .map(|x| x + transform.x)
@@ -79,7 +77,6 @@ impl LayerTransform for ExcellonLayerData {
                     .map(|y| y + transform.y)
                     .mm_to_unit(&fmt.unit);
             }
-            _ => {}
         })
     }
 }
@@ -112,7 +109,7 @@ impl LayerMerge for ExcellonLayerData {
                 Ok(Command::Machine(MachineCode::Scale(ec))) => Some(*ec),
                 _ => None,
             })
-            .unwrap_or_else(|| self.unit.unit.clone());
+            .unwrap_or(self.unit.unit);
         let mut last_tool = self.commands.iter().rev().find_map(|x| match x {
             Ok(Command::Tool(id)) => Some(*id),
             _ => None,
@@ -151,7 +148,7 @@ impl LayerMerge for ExcellonLayerData {
                 }
                 Ok(Command::Tool(t)) => {
                     *t = *tool_map.get(t).unwrap();
-                    if &Some(*t) != &last_tool {
+                    if Some(*t) != last_tool {
                         last_tool = Some(*t);
                     } else {
                         continue;
@@ -173,7 +170,7 @@ impl LayerMerge for ExcellonLayerData {
                 }
                 Ok(Command::Machine(MachineCode::Scale(sc))) => {
                     if sc != &last_unit {
-                        last_unit = sc.clone();
+                        last_unit = *sc;
                     } else {
                         continue;
                     }
@@ -321,11 +318,7 @@ impl UnitDefinition {
         let neg = raw.chars().nth(0) == Some('-');
         let len = (self.trailing + self.leading) as usize;
         let raw = if self.ty == ZeroSuppression::Leading {
-            let (raw, prefix) = if neg {
-                (&raw[1..], "-")
-            } else {
-                (&raw[..], "")
-            };
+            let (raw, prefix) = if neg { (&raw[1..], "-") } else { (raw, "") };
             if raw.len() < len {
                 format!("{}{}{}", prefix, raw, "0".repeat(len - raw.len()))
             } else {
@@ -334,10 +327,10 @@ impl UnitDefinition {
         } else {
             raw.to_string()
         };
-        if neg && raw.len() - 1 > len && raw.len()  > len {
+        if neg && raw.len() - 1 > len && raw.len() > len {
             panic!("too many bytes");
         }
-    raw.parse::<f64>()
+        raw.parse::<f64>()
             .map(|t| t / 10f64.powi(self.trailing as i32))
     }
 
@@ -495,15 +488,13 @@ impl FromStr for LineResult {
     type Err = ExcellonError;
 
     fn from_str(line: &str) -> Result<Self, Self::Err> {
-        if line.starts_with(';') {
+        if let Some(stripped) = line.strip_prefix(';') {
             // Comment line
-            Ok(LineResult::Command(Command::Comment(line[1..].to_string())))
-        } else if line.starts_with("FMAT,") {
-            let version = &line[5..];
+            Ok(LineResult::Command(Command::Comment(stripped.to_string())))
+        } else if let Some(version) = line.strip_prefix("FMAT,") {
             let version = version.parse().unwrap();
             Ok(LineResult::Command(Command::FormatCode(version)))
-        } else if line.starts_with("ICI") {
-            let options = &line[3..];
+        } else if let Some(options) = line.strip_prefix("ICI") {
             if options.is_empty() || options == ",ON" {
                 Ok(LineResult::Command(Command::Incremental(true)))
             } else if options == ",OFF" {
@@ -554,9 +545,9 @@ impl FromStr for LineResult {
                     leading,
                 },
             )))
-        } else if line.starts_with('M') {
+        } else if let Some(code) = line.strip_prefix('M') {
             // Machine code
-            let code = line[1..].parse::<u8>().unwrap_or(0);
+            let code = code.parse::<u8>().unwrap_or(0);
             let code = match code {
                 30 => MachineCode::EndOfProgram,
                 48 => MachineCode::HeaderStart,
@@ -605,7 +596,6 @@ impl FromStr for LineResult {
             for _ in 0..2 {
                 let num = line[pos + 1..]
                     .chars()
-                    .into_iter()
                     .take_while(|x| x.is_numeric() || x == &'-')
                     .collect::<String>();
                 let len = num.len() + 1;
@@ -616,11 +606,11 @@ impl FromStr for LineResult {
                 }
                 pos += len;
             }
-            return if x.is_some() || y.is_some() {
+            if x.is_some() || y.is_some() {
                 Ok(LineResult::RawCoordinate(x, y))
             } else {
                 Err(ExcellonError::InvalidCoordinate(line.to_string()))
-            };
+            }
         } else {
             Err(ExcellonError::InvalidCmd(line.to_string()))
         }
@@ -646,9 +636,9 @@ where
                 Ok(LineResult::Command(cmd)) => {
                     match &cmd {
                         Command::UnitDefinition(unit) => format = unit.clone(),
-                        Command::Machine(MachineCode::Scale(u)) => format.unit = u.clone(),
+                        Command::Machine(MachineCode::Scale(u)) => format.unit = *u,
                         Command::ToolDefinition(td) => {
-                            tools.insert(td.tool_number.clone(), td.diameter);
+                            tools.insert(td.tool_number, td.diameter);
                         }
                         Command::Tool(id) => {
                             if !tools.contains_key(id) {

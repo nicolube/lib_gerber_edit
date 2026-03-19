@@ -1,5 +1,8 @@
-use gerber_parser::gerber_types::{Aperture, ApertureDefinition, ApertureMacro, Command, CoordinateNumber, DCode, ExtendedCode, FunctionCode, MacroContent, MacroDecimal, Operation, StepAndRepeat, Unit};
 use crate::Size;
+use gerber_parser::gerber_types::{
+    Aperture, ApertureDefinition, ApertureMacro, Command, CoordinateNumber, DCode, ExtendedCode,
+    FunctionCode, MacroContent, MacroDecimal, Operation, StepAndRepeat, Unit,
+};
 
 /// A trait that allows conversion between mm and in
 pub(crate) trait UnitAble
@@ -60,8 +63,6 @@ where
     fn to_mm(&self, unit: &Unit) -> Self {
         self.map(|n| n.to_mm(unit))
     }
-
-
 }
 
 impl UnitAble for Size {
@@ -130,9 +131,7 @@ impl UnitAble for MacroContent {
                 l.dimensions = l.dimensions.mm_to_unit(unit);
             }
             MacroContent::Outline(o) => {
-                o.points
-                    .iter_mut()
-                    .for_each(|x| *x = x.mm_to_unit(unit));
+                o.points.iter_mut().for_each(|x| *x = x.mm_to_unit(unit));
             }
             MacroContent::Polygon(p) => {
                 p.center = p.center.mm_to_unit(unit);
@@ -175,9 +174,7 @@ impl UnitAble for MacroContent {
                 l.dimensions = l.dimensions.to_mm(unit);
             }
             MacroContent::Outline(o) => {
-                o.points
-                    .iter_mut()
-                    .for_each(|x| *x = x.to_mm(unit));
+                o.points.iter_mut().for_each(|x| *x = x.to_mm(unit));
             }
             MacroContent::Polygon(p) => {
                 p.center = p.center.to_mm(unit);
@@ -196,7 +193,7 @@ impl UnitAble for MacroContent {
                 t.gap = t.gap.to_mm(unit);
                 t.inner_diameter = t.inner_diameter.to_mm(unit);
                 t.outer_diameter.to_mm(unit);
-            },
+            }
             MacroContent::VariableDefinition(_) | MacroContent::Comment(_) => {}
         }
         cloned
@@ -212,7 +209,7 @@ impl UnitAble for Aperture {
                 circle.hole_diameter = circle.hole_diameter.mm_to_unit(unit);
             }
             Aperture::Obround(rect) | Aperture::Rectangle(rect) => {
-                rect.x = rect.x.mm_to_unit( unit);
+                rect.x = rect.x.mm_to_unit(unit);
                 rect.x = rect.y.mm_to_unit(unit);
                 rect.hole_diameter = rect.hole_diameter.mm_to_unit(unit);
             }
@@ -251,13 +248,13 @@ impl UnitAble for Aperture {
     }
 }
 
-
 impl UnitAble for Operation {
     fn mm_to_unit(&self, unit: &Unit) -> Self {
         let mut cloned = self.clone();
         match &mut cloned {
-            Operation::Interpolate(Some(val), _) |
-            Operation::Move(Some(val)) | Operation::Flash(Some(val)) => {
+            Operation::Interpolate(Some(val), _)
+            | Operation::Move(Some(val))
+            | Operation::Flash(Some(val)) => {
                 val.x = val.x.mm_to_unit(unit);
             }
             _ => {}
@@ -271,8 +268,9 @@ impl UnitAble for Operation {
     fn to_mm(&self, unit: &Unit) -> Self {
         let mut cloned = self.clone();
         match &mut cloned {
-            Operation::Interpolate(Some(val), _) |
-            Operation::Move(Some(val)) | Operation::Flash(Some(val)) => {
+            Operation::Interpolate(Some(val), _)
+            | Operation::Move(Some(val))
+            | Operation::Flash(Some(val)) => {
                 val.x = val.x.to_mm(unit);
             }
             _ => {}
@@ -333,8 +331,12 @@ impl UnitAble for ApertureDefinition {
 impl UnitAble for StepAndRepeat {
     fn mm_to_unit(&self, unit: &Unit) -> Self {
         let mut cloned = self.clone();
-        match &mut cloned  {
-            StepAndRepeat::Open { distance_x, distance_y, .. } => {
+        match &mut cloned {
+            StepAndRepeat::Open {
+                distance_x,
+                distance_y,
+                ..
+            } => {
                 *distance_x = distance_x.mm_to_unit(unit);
                 *distance_y = distance_y.mm_to_unit(unit);
             }
@@ -345,8 +347,12 @@ impl UnitAble for StepAndRepeat {
 
     fn to_mm(&self, unit: &Unit) -> Self {
         let mut cloned = self.clone();
-        match &mut cloned  {
-            StepAndRepeat::Open { distance_x, distance_y, .. } => {
+        match &mut cloned {
+            StepAndRepeat::Open {
+                distance_x,
+                distance_y,
+                ..
+            } => {
                 *distance_x = distance_x.to_mm(unit);
                 *distance_y = distance_y.to_mm(unit);
             }
@@ -376,7 +382,9 @@ impl UnitAble for ApertureMacro {
 impl UnitAble for ExtendedCode {
     fn mm_to_unit(&self, unit: &Unit) -> Self {
         match self {
-            ExtendedCode::ApertureDefinition(ap) => ExtendedCode::ApertureDefinition(ap.mm_to_unit(unit)),
+            ExtendedCode::ApertureDefinition(ap) => {
+                ExtendedCode::ApertureDefinition(ap.mm_to_unit(unit))
+            }
             ExtendedCode::ApertureMacro(val) => ExtendedCode::ApertureMacro(val.mm_to_unit(unit)),
             ExtendedCode::StepAndRepeat(val) => ExtendedCode::StepAndRepeat(val.mm_to_unit(unit)),
             val => val.clone(),
@@ -385,7 +393,9 @@ impl UnitAble for ExtendedCode {
 
     fn to_mm(&self, unit: &Unit) -> Self {
         match self {
-            ExtendedCode::ApertureDefinition(ap) => ExtendedCode::ApertureDefinition(ap.to_mm(unit)),
+            ExtendedCode::ApertureDefinition(ap) => {
+                ExtendedCode::ApertureDefinition(ap.to_mm(unit))
+            }
             ExtendedCode::ApertureMacro(val) => ExtendedCode::ApertureMacro(val.to_mm(unit)),
             ExtendedCode::StepAndRepeat(val) => ExtendedCode::StepAndRepeat(val.to_mm(unit)),
             val => val.clone(),

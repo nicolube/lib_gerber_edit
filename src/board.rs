@@ -1,16 +1,15 @@
+use crate::layer::{Layer, LayerData, LayerType};
+use crate::{LayerCorners, LayerMerge, LayerTransform, Pos, error, excellon_format};
+use gerber_parser::gerber_types::{Command, CommentContent, FunctionCode, GCode, GerberResult};
 use std::fs;
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
-use gerber_parser::gerber_types::{Command, CommentContent, FunctionCode, GCode, GerberResult};
-use crate::{error, excellon_format, LayerCorners, LayerMerge, LayerTransform, Pos};
-use crate::layer::{Layer, LayerData, LayerType};
 /// Board, a collection of layers of any type
 #[derive(Debug, Clone, PartialEq)]
 pub struct Board(Vec<Layer>);
 
 impl Board {
-
     /// Loads board from a Vec of layers file-name and a reader of the files data
     ///
     /// Layer type will be evaluated from file extension.
@@ -19,7 +18,7 @@ impl Board {
     pub fn new(data: Vec<(&str, BufReader<&mut dyn Read>)>) -> crate::Result<Self> {
         let mut result = Vec::new();
         for (name, reader) in data {
-            let ty = LayerType::try_from(name.rsplitn(2, ".").next().unwrap());
+            let ty = LayerType::try_from(name.rsplit(".").next().unwrap());
             match ty {
                 Ok(ty) => {
                     let (ty, data) = LayerData::parse(ty, reader)
@@ -66,7 +65,7 @@ impl Board {
             .filter_map(|entry| entry.ok())
             .filter_map(|entry| {
                 let name = entry.file_name().to_string_lossy().to_string();
-                let ty = LayerType::try_from(name.rsplitn(2, ".").next().unwrap());
+                let ty = LayerType::try_from(name.rsplit(".").next().unwrap());
                 if matches!(entry.file_type(), Ok(ty) if ty.is_file()) && ty.is_ok() {
                     Some(
                         File::open(entry.path().as_path())
@@ -147,7 +146,6 @@ impl Board {
 }
 
 impl LayerCorners for Board {
-
     /// Returns corners of board
     ///
     /// Will get them by getting min and max coords of each layer
@@ -182,7 +180,6 @@ impl LayerCorners for Board {
 }
 
 impl LayerTransform for Board {
-
     /// Adds an offset to all layers
     fn transform(&mut self, transform: &Pos) {
         for layer in &mut self.0 {
@@ -192,13 +189,12 @@ impl LayerTransform for Board {
 }
 
 impl LayerMerge for Board {
-
     /// Will merge all layers of same type else it will insert the layer
     fn merge(&mut self, other: &Self) {
         for layer in &mut self.0 {
-            other
-                .get_layer(&layer.ty)
-                .map(|other| layer.data.merge(&other.data));
+            if let Some(other) = other.get_layer(&layer.ty) {
+                layer.data.merge(&other.data)
+            }
         }
     }
 }

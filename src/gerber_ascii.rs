@@ -9,7 +9,6 @@ use std::io::BufReader;
 const CHAR_SIZE: u8 = 94;
 const TEXT_HEIGHT: f64 = 9.6577;
 
-
 /// Loads font from gerber file
 fn load_ascii() -> Vec<Vec<Command>> {
     let raw = include_str!("gerber/kicad_font.gbr");
@@ -92,7 +91,7 @@ where
                 pos.y -= HEIGHT;
                 pos.x = 0.0;
             }
-            _ if c >= '!' && c <= '~' => {
+            _ if ('!'..='~').contains(&c) => {
                 let i = c as usize - '!' as usize;
                 let mut char = CHARS[i].clone();
                 let scale = size / 3.0;

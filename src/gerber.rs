@@ -1,14 +1,19 @@
+use crate::gerber_types::InterpolationMode;
+use crate::unit_able::UnitAble;
 use crate::{
     LayerCorners, LayerData, LayerMerge, LayerScale, LayerStepAndRepeat, LayerTransform, LayerType,
     Pos,
 };
 use chrono::Utc;
-use gerber_parser::gerber_types::{Aperture, ApertureDefinition, ApertureMacro, Command, CommentContent, CoordinateFormat, CoordinateMode, CoordinateNumber, Coordinates, DCode, ExtendedCode, FileAttribute, FunctionCode, GCode, GerberCode, GerberDate, GerberResult, ImageName, MCode, MacroContent, Operation, Polarity, QuadrantMode, StandardComment, StepAndRepeat, Unit, ZeroOmission};
+use gerber_parser::gerber_types::{
+    Aperture, ApertureDefinition, ApertureMacro, Command, CommentContent, CoordinateFormat,
+    CoordinateMode, CoordinateNumber, Coordinates, DCode, ExtendedCode, FileAttribute,
+    FunctionCode, GCode, GerberCode, GerberDate, GerberResult, ImageName, MCode, MacroContent,
+    Operation, Polarity, QuadrantMode, StandardComment, StepAndRepeat, Unit, ZeroOmission,
+};
 use gerber_parser::{GerberDoc, ParseError};
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Read, Write};
-use crate::gerber_types::InterpolationMode;
-use crate::unit_able::UnitAble;
 
 /// And gerber layer file separated into its components
 #[derive(Debug, Clone, PartialEq)]
@@ -22,7 +27,6 @@ pub struct GerberLayerData {
 }
 
 impl GerberLayerData {
-
     /// Creates a new layer from already loaded gerber doc and its layer type
     pub fn new(ty: LayerType, data: GerberDoc) -> Result<Self, ParseError> {
         for command in &data.commands {
@@ -32,24 +36,22 @@ impl GerberLayerData {
         }
 
         let file_unit = data.units.unwrap_or(Unit::Millimeters);
-        let mut unit = file_unit.clone();
+        let mut unit = file_unit;
 
         let macros = data
             .commands()
             .into_iter()
-            .filter_map(|cmd|
-                match cmd {
-                    Command::ExtendedCode(ExtendedCode::ApertureMacro(mac)) => {
-                        Some((mac.name.clone(), mac.content.clone()))
-                    }
-                    Command::FunctionCode(FunctionCode::GCode(GCode::Unit(cmd))) => {
-                        unit = cmd.clone();
-                        None
-                    }
-                    _ => None,
-                })
+            .filter_map(|cmd| match cmd {
+                Command::ExtendedCode(ExtendedCode::ApertureMacro(mac)) => {
+                    Some((mac.name.clone(), mac.content.clone()))
+                }
+                Command::FunctionCode(FunctionCode::GCode(GCode::Unit(cmd))) => {
+                    unit = *cmd;
+                    None
+                }
+                _ => None,
+            })
             .collect::<HashMap<_, _>>();
-
 
         let commands = data
             .commands()
@@ -79,7 +81,8 @@ impl GerberLayerData {
             commands,
             macros,
             apertures: data.apertures,
-        }.to_unit(&Unit::Millimeters))
+        }
+        .to_unit(&Unit::Millimeters))
     }
 
     /// Parses GerberLayer from reader with given type
@@ -98,8 +101,9 @@ impl GerberLayerData {
     {
         let data = gerber_parser::parse(reader).map_err(|(_, err)| err)?;
 
-        let layer_type = LayerType::from_commands(data.commands())
-            .ok_or(ParseError::IoError("Type not found in file attributes".to_string()))?;
+        let layer_type = LayerType::from_commands(data.commands()).ok_or(ParseError::IoError(
+            "Type not found in file attributes".to_string(),
+        ))?;
 
         Self::new(layer_type, data)
     }
@@ -107,7 +111,12 @@ impl GerberLayerData {
     /// Creates an empty gerber layer
     pub fn empty(layer_type: LayerType) -> Self {
         Self {
-            coordinate_format: CoordinateFormat::new(ZeroOmission::Leading, CoordinateMode::Absolute, 4, 6),
+            coordinate_format: CoordinateFormat::new(
+                ZeroOmission::Leading,
+                CoordinateMode::Absolute,
+                4,
+                6,
+            ),
             apertures: HashMap::new(),
             layer_type,
             macros: HashMap::new(),
@@ -127,14 +136,15 @@ impl GerberLayerData {
             return self;
         }
 
-        self.coordinate_format = CoordinateFormat::new(ZeroOmission::Leading, CoordinateMode::Absolute, 4, 6);
+        self.coordinate_format =
+            CoordinateFormat::new(ZeroOmission::Leading, CoordinateMode::Absolute, 4, 6);
 
         match unit {
             Unit::Millimeters => self.scale(25.4, 25.4),
             Unit::Inches => self.scale(1.0 / 25.4, 1.0 / 25.4),
         }
 
-        for (_, aperture) in &mut self.apertures {
+        for aperture in self.apertures.values_mut() {
             match aperture {
                 Aperture::Circle(circle) => {
                     circle.diameter.convert_unit_self(&self.unit, unit);
@@ -155,43 +165,39 @@ impl GerberLayerData {
             };
         }
 
-       self.macros.values_mut().for_each(|contents| {
+        self.macros.values_mut().for_each(|contents| {
             contents.iter_mut().for_each(|content| {
-                content.convert_unit_self( &self.unit, unit);
+                content.convert_unit_self(&self.unit, unit);
             });
         });
 
-        self.unit = unit.clone();
+        self.unit = *unit;
         self
     }
 
     /// Converts Layer to just a set of commands
     fn to_commands(&self) -> Vec<Command> {
-        let mut commands = vec![
-            Command::FunctionCode(FunctionCode::GCode(GCode::Comment(CommentContent::String(
-                "ProAdm generated panel".to_string(),
-            )))),
-        ];
+        let mut commands = vec![Command::FunctionCode(FunctionCode::GCode(GCode::Comment(
+            CommentContent::String("ProAdm generated panel".to_string()),
+        )))];
         commands.extend(
             [
                 FileAttribute::FileFunction(self.layer_type.function()),
                 FileAttribute::CreationDate(GerberDate::from(Utc::now())),
             ]
-                .into_iter()
-                .map(|fa| {
-                    Command::FunctionCode(FunctionCode::GCode(GCode::Comment(
-                        CommentContent::Standard(StandardComment::FileAttribute(fa)),
-                    )))
-                }),
+            .into_iter()
+            .map(|fa| {
+                Command::FunctionCode(FunctionCode::GCode(GCode::Comment(
+                    CommentContent::Standard(StandardComment::FileAttribute(fa)),
+                )))
+            }),
         );
         commands.extend([
             Command::FunctionCode(FunctionCode::GCode(GCode::QuadrantMode(
                 QuadrantMode::Multi,
             ))),
-            Command::ExtendedCode(ExtendedCode::Unit(self.unit.clone())),
-            Command::ExtendedCode(ExtendedCode::CoordinateFormat(
-                self.coordinate_format.clone(),
-            )),
+            Command::ExtendedCode(ExtendedCode::Unit(self.unit)),
+            Command::ExtendedCode(ExtendedCode::CoordinateFormat(self.coordinate_format)),
             Command::ExtendedCode(ExtendedCode::LoadPolarity(Polarity::Dark)),
             Command::ExtendedCode(ExtendedCode::ImageName(ImageName {
                 name: self.layer_type.file_ending().to_string(),
@@ -298,7 +304,7 @@ impl LayerMerge for GerberLayerData {
                         if current == aperture { Some(id) } else { None }
                     },
                 );
-            while self.apertures.get(&aperture_id).is_some() && found_id.is_none() {
+            while self.apertures.contains_key(&aperture_id) && found_id.is_none() {
                 aperture_id += 1;
             }
 
@@ -321,12 +327,12 @@ impl LayerMerge for GerberLayerData {
                     Operation::Interpolate(Some(cords), _)
                     | Operation::Move(Some(cords))
                     | Operation::Flash(Some(cords)) => {
-                        cords.format = self.coordinate_format.clone();
+                        cords.format = self.coordinate_format;
                     }
                     _ => {}
                 };
                 if let Operation::Interpolate(_, Some(cords)) = &mut op {
-                    cords.format = self.coordinate_format.clone()
+                    cords.format = self.coordinate_format
                 }
                 self.commands
                     .push(Command::FunctionCode(FunctionCode::DCode(
@@ -412,7 +418,7 @@ impl LayerScale for (&CoordinateFormat, &mut Vec<Command>) {
                         pos.y = pos
                             .y
                             .map(|v| CoordinateNumber::try_from(f64::from(v) * y).unwrap());
-                        pos.format = format.clone();
+                        pos.format = **format;
                     }
                     _ => {}
                 }
@@ -423,7 +429,7 @@ impl LayerScale for (&CoordinateFormat, &mut Vec<Command>) {
                     pos.y = pos
                         .y
                         .map(|v| CoordinateNumber::try_from(f64::from(v) * y).unwrap());
-                    pos.format = format.clone();
+                    pos.format = **format;
                 }
             }
         }
@@ -438,8 +444,20 @@ impl LayerStepAndRepeat for (&Unit, &mut Vec<Command>) {
             distance_x: offset.x.mm_to_unit(self.0),
             distance_y: offset.y.mm_to_unit(self.0),
         }));
+
         let commands = &mut self.1;
         commands.insert(0, sr);
+        // We do this because Avion is stupid and does not update their software...
+        // Well for some reason they do not interpret SR close correctly so we put a 1x1 SR here
+        // witch results in the same behavior then SR close.
+        const SR_RESET_DUMMY: Command =
+            Command::ExtendedCode(ExtendedCode::StepAndRepeat(StepAndRepeat::Open {
+                repeat_x: 1,
+                repeat_y: 1,
+                distance_x: 0f64,
+                distance_y: 0f64,
+            }));
+        commands.push(SR_RESET_DUMMY);
         commands.push(Command::ExtendedCode(ExtendedCode::StepAndRepeat(
             StepAndRepeat::Close,
         )))
@@ -453,19 +471,19 @@ impl From<GerberLayerData> for LayerData {
 }
 
 pub trait Optimize {
-
-    fn optimize(values: &Vec<Self>) -> Vec<&Self> where Self: Sized;
-
+    fn optimize(values: &[Self]) -> Vec<&Self>
+    where
+        Self: Sized;
 }
 
 #[derive(Debug, Default)]
 struct OptimizationContext<'a> {
     quadrant_mode: Option<&'a QuadrantMode>,
     aperture: Option<&'a i32>,
-    interpolation_mode: Option<&'a InterpolationMode>
+    interpolation_mode: Option<&'a InterpolationMode>,
 }
 impl Optimize for Command {
-    fn optimize(values: &Vec<Self>) -> Vec<&Self> {
+    fn optimize(values: &[Self]) -> Vec<&Self> {
         let mut result = Vec::new();
         let mut context = OptimizationContext::default();
         for command in values.iter() {
@@ -490,11 +508,10 @@ impl Optimize for Command {
                         continue;
                     }
                     context.quadrant_mode = Some(current)
-                },
+                }
                 _ => {}
             }
             result.push(command);
-
         }
         result
     }

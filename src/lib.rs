@@ -18,7 +18,6 @@ use serde::{Deserialize, Serialize};
 pub type Result<T> = std::result::Result<T, error::Error>;
 
 pub trait LayerCorners {
-
     /// Returns size of layer calculated by corners diff
     fn get_size(&self) -> Size {
         let (min, max) = self.get_corners();
@@ -32,25 +31,21 @@ pub trait LayerCorners {
 }
 
 pub trait LayerTransform {
-
     /// Adds an offset to given data
     fn transform(&mut self, transform: &Pos);
 }
 
 pub trait LayerScale {
-
     /// Scales to given data by x and y
     fn scale(&mut self, x: f64, y: f64);
 }
 
 pub trait LayerMerge {
-
     /// Appends given data, tools need to be merged and remapped
     fn merge(&mut self, other: &Self);
 }
 
 pub trait LayerStepAndRepeat {
-
     /// Multiplies given data by x and y with offset
     fn step_and_repeat(&mut self, x_repetitions: u32, y_repetitions: u32, offset: &Pos);
 }
@@ -106,10 +101,10 @@ macro_rules! load_board_data {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::board::Board;
     use std::fs;
     use std::path::Path;
-    use crate::board::Board;
-    use super::*;
 
     #[test]
     fn it_works() {

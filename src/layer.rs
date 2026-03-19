@@ -39,7 +39,7 @@ impl LayerData {
             LayerType::Drill => (
                 ty.clone(),
                 LayerData::Excellon(
-                    parse_excellon(reader).map_err(|e| ParseError::ExcellonParseError(e))?,
+                    parse_excellon(reader).map_err(ParseError::ExcellonParseError)?,
                 ),
             ),
             LayerType::UndefinedGerber => {
@@ -353,10 +353,8 @@ mod serde {
         {
             let mut writer = BufWriter::new(Vec::new());
             self.write_to(&mut writer).unwrap();
-            serializer.serialize_str(
-                &String::from_utf8_lossy(&writer
-                    .into_inner()
-                    .map_err(|err| S::Error::custom(err))?,
+            serializer.serialize_str(&String::from_utf8_lossy(
+                &writer.into_inner().map_err(S::Error::custom)?,
             ))
         }
     }
