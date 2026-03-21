@@ -52,7 +52,7 @@ pub trait LayerStepAndRepeat {
 
 /// Position in mm
 #[derive(Debug, Clone, PartialEq, Display)]
-#[display("x: {x:.2}, y: {y:.2}")]
+#[display("x: {x:.3}, y: {y:.3}")]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Pos {
     pub x: f64,
@@ -61,7 +61,7 @@ pub struct Pos {
 
 /// Size in mm
 #[derive(Debug, Clone, PartialEq, Display)]
-#[display("width: {width:.2}, height: {height:.2}")]
+#[display("width: {width:.3}, height: {height:.3}")]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Size {
     pub width: f64,
