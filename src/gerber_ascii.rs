@@ -53,16 +53,16 @@ fn load_ascii() -> Vec<Vec<Command>> {
 }
 
 /// Generates gerber commands for given text and size into a new gerber layer
-pub fn write_ascii<T>(txt: T, size: f64, layer_type: LayerType) -> GerberLayerData
+pub fn write_ascii<T>(txt: T, size: f64, ratio: f64, layer_type: LayerType) -> GerberLayerData
 where
     T: AsRef<str>,
 {
-    const HEIGHT: f64 = TEXT_HEIGHT / 2.0;
+    let height: f64 = TEXT_HEIGHT / 6.0 * size;
     let mut layer = GerberLayerData::empty(layer_type);
     layer.apertures.insert(
         10,
         Aperture::Circle(Circle {
-            diameter: size / 10.0,
+            diameter: size / 10.0 * ratio,
             hole_diameter: None,
         }),
     );
@@ -82,13 +82,13 @@ where
     let lines = txt.lines().count();
     let mut pos = Pos {
         x: 0.0,
-        y: (lines - 1) as f64 * HEIGHT,
+        y: (lines - 1) as f64 * height,
     };
     for c in txt.chars() {
         match c {
             ' ' => pos.x += 0.6 * size,
             '\n' => {
-                pos.y -= HEIGHT;
+                pos.y -= height;
                 pos.x = 0.0;
             }
             _ if ('!'..='~').contains(&c) => {
@@ -123,6 +123,7 @@ mod tests {
         let layer = write_ascii(
             "~Hello \"World\" 0123456789".to_string(),
             3.0,
+            1.0,
             LayerType::SilkScreenTop,
         );
         fs::create_dir_all("output").unwrap();
