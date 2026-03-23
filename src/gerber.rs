@@ -1,4 +1,4 @@
-use crate::gerber_types::InterpolationMode;
+use crate::gerber_types::{CoordinateOffset, InterpolationMode};
 use crate::unit_able::UnitAble;
 use crate::{
     LayerCorners, LayerData, LayerMerge, LayerScale, LayerStepAndRepeat, LayerTransform, LayerType,
@@ -458,29 +458,37 @@ impl LayerScale for (&CoordinateFormat, &mut Vec<Command>) {
                     Operation::Interpolate(Some(pos), _)
                     | Operation::Move(Some(pos))
                     | Operation::Flash(Some(pos)) => {
-                        pos.x = pos
-                            .x
-                            .map(|v| CoordinateNumber::try_from(f64::from(v) * x).unwrap());
-                        pos.y = pos
-                            .y
-                            .map(|v| CoordinateNumber::try_from(f64::from(v) * y).unwrap());
+                        pos.scale(x, y);
                         pos.format = **format;
                     }
                     _ => {}
                 }
                 if let Operation::Interpolate(_, Some(pos)) = op {
-                    pos.x = pos
-                        .x
-                        .map(|v| CoordinateNumber::try_from(f64::from(v) * x).unwrap());
-                    pos.y = pos
-                        .y
-                        .map(|v| CoordinateNumber::try_from(f64::from(v) * y).unwrap());
+                    pos.scale(x, y);
                     pos.format = **format;
                 }
             }
         }
     }
 }
+
+macro_rules! coord_scaling {
+    ($name:ident) => {
+        impl LayerScale for $name {
+            fn scale(&mut self, x: f64, y: f64) {
+                self.x = self
+                    .x
+                    .map(|v| CoordinateNumber::try_from(f64::from(v) * x).unwrap());
+                self.y = self
+                    .y
+                    .map(|v| CoordinateNumber::try_from(f64::from(v) * y).unwrap());
+            }
+        }
+    };
+}
+
+coord_scaling!(Coordinates);
+coord_scaling!(CoordinateOffset);
 
 impl LayerStepAndRepeat for (&Unit, &mut Vec<Command>) {
     fn step_and_repeat(&mut self, x_repetitions: u32, y_repetitions: u32, offset: &Pos) {
