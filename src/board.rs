@@ -159,6 +159,10 @@ impl LayerCorners for Board {
             y: f64::MIN,
         };
         for layer in self.0.iter() {
+            // Those layers have no relevance for board size calculations
+            if [LayerType::KeepOut, LayerType::Info, LayerType::SidePlating].contains(&layer.ty) {
+                continue;
+            }
             if let LayerData::Gerber(layer) = &layer.data {
                 let (layer_min, layer_max) = layer.get_corners();
                 if layer_min.x < min.x {

@@ -3,7 +3,7 @@ name = "lib_gerber_edit"
 description = "A libary for manipululating extended gerber data (RS-274X)"
 repository = "https://github.com/nicolube/lib_gerber_edit"
 license-file = "LICENSE"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 
 [dependencies]
