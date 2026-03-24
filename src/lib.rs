@@ -51,7 +51,7 @@ pub trait LayerStepAndRepeat {
 }
 
 /// Position in mm
-#[derive(Debug, Clone, PartialEq, Display)]
+#[derive(Debug, Clone, PartialEq, Display, Default)]
 #[display("x: {x:.3}, y: {y:.3}")]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Pos {
@@ -60,7 +60,7 @@ pub struct Pos {
 }
 
 /// Size in mm
-#[derive(Debug, Clone, PartialEq, Display)]
+#[derive(Debug, Clone, PartialEq, Display, Default)]
 #[display("width: {width:.3}, height: {height:.3}")]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Size {

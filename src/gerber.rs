@@ -251,30 +251,26 @@ impl GerberLayerData {
     }
 }
 
-fn min_max(min: &mut Pos, max: &mut Pos, coords: &Coordinates, unit: &Unit) {
-    if let Some(x) = coords.x {
-        let x = x.to_mm(unit).into();
-        if x < min.x {
-            min.x = x;
-        }
-        if x > max.x {
-            max.x = x;
-        }
-    }
-    if let Some(y) = coords.y {
-        let y = y.to_mm(unit).into();
-        if y < min.y {
-            min.y = y;
-        }
-        if y > max.y {
-            max.y = y;
-        }
-    }
-}
+fn min_max(
+    min: &mut Pos,
+    max: &mut Pos,
+    coords: &Coordinates,
+    unit: &Unit,
+    tool: &Option<(Pos, Pos)>,
+) {
+    let default = (Pos::default(), Pos::default());
+    let (tool_min, tool_max) = tool.as_ref().unwrap_or(&default);
 
-impl LayerCorners for GerberLayerData {
-    fn get_corners(&self) -> (Pos, Pos) {
-        (&self.unit, &self.commands).get_corners()
+    if let Some(x) = coords.x {
+        let x = f64::from(x.to_mm(unit));
+        min.x = min.x.min(x + tool_min.x);
+        max.x = max.x.max(x + tool_max.x);
+    }
+
+    if let Some(y) = coords.y {
+        let y = f64::from(y.to_mm(unit));
+        min.y = min.y.min(y + tool_min.y);
+        max.y = max.y.max(y + tool_max.y);
     }
 }
 
@@ -368,13 +364,63 @@ impl LayerCorners for (&Unit, &Vec<Command>) {
                     Operation::Move(Some(coords))
                     | Operation::Flash(Some(coords))
                     | Operation::Interpolate(Some(coords), _) => {
-                        min_max(&mut min, &mut max, coords, unit);
+                        min_max(&mut min, &mut max, coords, unit, &None);
                     }
                     _ => {}
                 }
             }
         }
         (min, max)
+    }
+}
+impl LayerCorners for GerberLayerData {
+    fn get_corners(&self) -> (Pos, Pos) {
+        let unit = &self.unit;
+        let commands = &self.commands;
+        let mut min = Pos {
+            x: f64::MAX,
+            y: f64::MAX,
+        };
+        let mut max = Pos {
+            x: f64::MIN,
+            y: f64::MIN,
+        };
+        let mut tool = None;
+        for command in commands.iter() {
+            if let Command::FunctionCode(FunctionCode::DCode(DCode::SelectAperture(ap))) = command {
+                if let Some(ap) = self.apertures.get(&ap) {
+                    tool = Some(ap.get_corners());
+                }
+            }
+            if let Command::FunctionCode(FunctionCode::DCode(DCode::Operation(op))) = command {
+                match op {
+                    Operation::Move(Some(coords))
+                    | Operation::Flash(Some(coords))
+                    | Operation::Interpolate(Some(coords), _) => {
+                        min_max(&mut min, &mut max, coords, unit, &tool);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (min, max)
+    }
+}
+
+impl LayerCorners for Aperture {
+    fn get_corners(&self) -> (Pos, Pos) {
+        let (h, w) = match self {
+            Aperture::Circle(c) => (c.diameter, c.diameter),
+            Aperture::Obround(r) | Aperture::Rectangle(r) => (r.x, r.y),
+            Aperture::Polygon(_) | Aperture::Macro(_, _) => (0.0, 0.0),
+        };
+        // If line is very thin, it can be considered 0.
+        // This is mostly done to ignore line with of dimensions
+        if h < 0.1 && w < 0.1 {
+            return (Pos::default(), Pos::default());
+        }
+        let (x, y) = (h / 2.0, w / 2.0);
+        (Pos { x: -x, y: -y }, Pos { x, y })
     }
 }
 
@@ -482,6 +528,7 @@ struct OptimizationContext<'a> {
     aperture: Option<&'a i32>,
     interpolation_mode: Option<&'a InterpolationMode>,
 }
+
 impl Optimize for Command {
     fn optimize(values: &[Self]) -> Vec<&Self> {
         let mut result = Vec::new();
@@ -514,5 +561,21 @@ impl Optimize for Command {
             result.push(command);
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::File;
+    use crate::Size;
+    use super::*;
+
+    #[test]
+    fn test_layer_size() -> Result<(), Box<dyn std::error::Error>> {
+        let layer = GerberLayerData::from_type(
+            LayerType::Dimensions,
+            BufReader::new(File::open("test/test_outline.gbr")?))?;
+        assert_eq!(layer.get_size(), Size { width: 112.0, height: 132.0 });
+        Ok(())
     }
 }
