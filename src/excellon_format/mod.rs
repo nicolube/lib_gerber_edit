@@ -26,7 +26,6 @@ impl ExcellonLayerData {
         for command in &self.header {
             match &command {
                 Ok(Command::ToolDefinition(_)) => continue,
-
                 Ok(Command::Machine(MachineCode::RewindStop))
                 | Ok(Command::Machine(MachineCode::HeaderEnd)) => {
                     header_end = command.as_ref().unwrap().clone();
@@ -224,6 +223,8 @@ pub enum ExcellonError {
     FloatParse(#[error(source)] ParseFloatError, String),
     #[display("Failed to parse number: {}", _1)]
     IntParse(#[error(source)] ParseIntError, String),
+    #[display("Failed to parse version number")]
+    InvalidVersion,
     #[display("{}", _0)]
     Custom(#[error(not(source))] String),
 }
@@ -492,7 +493,7 @@ impl FromStr for LineResult {
             // Comment line
             Ok(LineResult::Command(Command::Comment(stripped.to_string())))
         } else if let Some(version) = line.strip_prefix("FMAT,") {
-            let version = version.parse().unwrap();
+            let version = version.parse().map_err(|_| ExcellonError::InvalidVersion)?;
             Ok(LineResult::Command(Command::FormatCode(version)))
         } else if let Some(options) = line.strip_prefix("ICI") {
             if options.is_empty() || options == ",ON" {
@@ -528,11 +529,10 @@ impl FromStr for LineResult {
             } else {
                 UnitDefinition::default().ty
             };
-            let (leading, trailing) = if parts.len() >= 3 {
-                let mut format_part = parts[2].split(".");
-                let leading = format_part.next().unwrap().len() as u8;
-                let trailing = format_part.next().unwrap().len() as u8;
-                (leading, trailing)
+            let (leading, trailing) = if parts.len() >= 3
+                && let Some((leading, trailing)) = parts[2].split_once(".")
+            {
+                (leading.len() as u8, trailing.len() as u8)
             } else {
                 let default = UnitDefinition::default();
                 (default.leading, default.trailing)
@@ -653,8 +653,8 @@ where
                     Ok(cmd)
                 }
                 Ok(LineResult::RawCoordinate(x, y)) => Ok(Command::Coordinate(
-                    x.map(|t| format.parse_num(t.as_str()).unwrap()),
-                    y.map(|t| format.parse_num(t.as_str()).unwrap()),
+                    x.and_then(|t| format.parse_num(t.as_str()).ok()),
+                    y.and_then(|t| format.parse_num(t.as_str()).ok()),
                     format.clone(),
                 )),
                 Err(err) => Err(err),
@@ -703,25 +703,24 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
-    fn test_excellon() {
+    fn test_excellon() -> Result<(), Box<dyn std::error::Error>> {
         let raw = include_str!("../../test/demo.drd");
         let reader = BufReader::new(Cursor::new(raw));
-        let mut data = parse_excellon(reader).unwrap();
+        let mut data = parse_excellon(reader)?;
         let mut clone = data.clone();
         clone.transform(&Pos { x: 10.0, y: 15.0 });
         data.merge(&clone);
         for cmd in data.header {
-            cmd.unwrap();
-            // print!("{}", cmd.as_ref().unwrap())
+            cmd?;
         }
         for cmd in data.commands {
-            cmd.unwrap();
-            // print!("{}", cmd.as_ref().unwrap())
+            cmd?;
         }
+        Ok(())
     }
 
     #[test]
-    fn test_leading_trailing() {
+    fn test_leading_trailing() -> Result<(), Box<dyn std::error::Error>> {
         let fmt = UnitDefinition {
             leading: 3,
             trailing: 3,
@@ -731,11 +730,11 @@ mod tests {
         let num = 12.34;
         let serialized = fmt.serialize(num);
         assert_eq!(serialized, "01234");
-        assert_eq!(fmt.parse_num(&serialized).unwrap(), num);
+        assert_eq!(fmt.parse_num(&serialized)?, num);
         let num = -12.34;
         let serialized = fmt.serialize(num);
         assert_eq!(serialized, "-01234");
-        assert_eq!(fmt.parse_num(&serialized).unwrap(), num);
+        assert_eq!(fmt.parse_num(&serialized)?, num);
         let fmt = UnitDefinition {
             leading: 3,
             trailing: 3,
@@ -745,11 +744,12 @@ mod tests {
         let num = 12.34;
         let serialized = fmt.serialize(num);
         assert_eq!(serialized, "12340");
-        assert_eq!(fmt.parse_num(&serialized).unwrap(), num);
+        assert_eq!(fmt.parse_num(&serialized)?, num);
         let num = -12.34;
         let serialized = fmt.serialize(num);
         assert_eq!(serialized, "-12340");
-        assert_eq!(fmt.parse_num(&serialized).unwrap(), num);
+        assert_eq!(fmt.parse_num(&serialized)?, num);
+        Ok(())
     }
 }
 

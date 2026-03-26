@@ -119,16 +119,17 @@ mod tests {
     use std::io::BufWriter;
 
     #[test]
-    fn test_ascii() {
+    fn test_ascii() -> Result<(), Box<dyn std::error::Error>> {
         let layer = write_ascii(
             "~Hello \"World\" 0123456789".to_string(),
             3.0,
             1.0,
             LayerType::SilkScreenTop,
         );
-        fs::create_dir_all("output").unwrap();
-        let file = fs::File::create("output/ascii.gbr").unwrap();
+        fs::create_dir_all("output")?;
+        let file = fs::File::create("output/ascii.gbr")?;
         let mut writer = BufWriter::new(file);
-        layer.write_to(&mut writer).unwrap();
+        layer.write_to(&mut writer)?;
+        Ok(())
     }
 }

@@ -208,6 +208,7 @@ impl LayerType {
     }
 
     /// Converts FileFunction to matching LayerType
+    #[allow(clippy::self_named_constructors)]
     pub fn layer_type(file_function: &FileFunction) -> LayerType {
         match file_function {
             FileFunction::Copper {
@@ -352,12 +353,13 @@ mod serde {
             S: Serializer,
         {
             let mut writer = BufWriter::new(Vec::new());
-            self.write_to(&mut writer).unwrap();
+            self.write_to(&mut writer).map_err(S::Error::custom)?;
             serializer.serialize_str(&String::from_utf8_lossy(
                 &writer.into_inner().map_err(S::Error::custom)?,
             ))
         }
     }
+
     impl Serialize for Layer {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
         where

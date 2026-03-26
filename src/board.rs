@@ -18,7 +18,7 @@ impl Board {
     pub fn new(data: Vec<(&str, BufReader<&mut dyn Read>)>) -> crate::Result<Self> {
         let mut result = Vec::new();
         for (name, reader) in data {
-            let ty = LayerType::try_from(name.rsplit(".").next().unwrap());
+            let ty = LayerType::try_from(name.rsplit(".").next().unwrap_or_default());
             match ty {
                 Ok(ty) => {
                     let (ty, data) = LayerData::parse(ty, reader)
@@ -65,7 +65,7 @@ impl Board {
             .filter_map(|entry| entry.ok())
             .filter_map(|entry| {
                 let name = entry.file_name().to_string_lossy().to_string();
-                let ty = LayerType::try_from(name.rsplit(".").next().unwrap());
+                let ty = LayerType::try_from(name.rsplit(".").next().unwrap_or_default());
                 if matches!(entry.file_type(), Ok(ty) if ty.is_file()) && ty.is_ok() {
                     Some(
                         File::open(entry.path().as_path())

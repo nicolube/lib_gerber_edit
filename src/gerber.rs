@@ -1,3 +1,4 @@
+use crate::error::ParseError;
 use crate::gerber_types::{CoordinateOffset, InterpolationMode};
 use crate::unit_able::UnitAble;
 use crate::{
@@ -5,13 +6,13 @@ use crate::{
     Pos,
 };
 use chrono::Utc;
+use gerber_parser::GerberDoc;
 use gerber_parser::gerber_types::{
     Aperture, ApertureDefinition, ApertureMacro, Command, CommentContent, CoordinateFormat,
     CoordinateMode, CoordinateNumber, Coordinates, DCode, ExtendedCode, FileAttribute,
     FunctionCode, GCode, GerberCode, GerberDate, GerberResult, ImageName, MCode, MacroContent,
     Operation, Polarity, QuadrantMode, StandardComment, StepAndRepeat, Unit, ZeroOmission,
 };
-use gerber_parser::{GerberDoc, ParseError};
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Read, Write};
 
@@ -74,9 +75,12 @@ impl GerberLayerData {
 
         let ty = LayerType::from_commands(&commands).unwrap_or(ty);
 
+        let coordinate_format = data
+            .format_specification
+            .ok_or(ParseError::FormatMissing(ty.to_string()))?;
         Ok(Self {
             unit: data.units.unwrap_or(Unit::Millimeters),
-            coordinate_format: data.format_specification.unwrap(),
+            coordinate_format,
             layer_type: ty,
             commands,
             macros,
@@ -101,9 +105,8 @@ impl GerberLayerData {
     {
         let data = gerber_parser::parse(reader).map_err(|(_, err)| err)?;
 
-        let layer_type = LayerType::from_commands(data.commands()).ok_or(ParseError::IoError(
-            "Type not found in file attributes".to_string(),
-        ))?;
+        let layer_type =
+            LayerType::from_commands(data.commands()).ok_or(ParseError::TypeNotFound)?;
 
         Self::new(layer_type, data)
     }
@@ -347,6 +350,19 @@ impl LayerStepAndRepeat for GerberLayerData {
     }
 }
 
+fn cmd_into_coords(command: &Command) -> Option<&Coordinates> {
+    if let Command::FunctionCode(FunctionCode::DCode(DCode::Operation(
+        Operation::Move(Some(coords))
+        | Operation::Flash(Some(coords))
+        | Operation::Interpolate(Some(coords), _),
+    ))) = command
+    {
+        Some(coords)
+    } else {
+        None
+    }
+}
+
 impl LayerCorners for (&Unit, &Vec<Command>) {
     fn get_corners(&self) -> (Pos, Pos) {
         let (unit, cmds) = self;
@@ -359,15 +375,8 @@ impl LayerCorners for (&Unit, &Vec<Command>) {
             y: f64::MIN,
         };
         for command in cmds.iter() {
-            if let Command::FunctionCode(FunctionCode::DCode(DCode::Operation(op))) = command {
-                match op {
-                    Operation::Move(Some(coords))
-                    | Operation::Flash(Some(coords))
-                    | Operation::Interpolate(Some(coords), _) => {
-                        min_max(&mut min, &mut max, coords, unit, &None);
-                    }
-                    _ => {}
-                }
+            if let Some(coords) = cmd_into_coords(command) {
+                min_max(&mut min, &mut max, coords, unit, &None);
             }
         }
         (min, max)
@@ -387,20 +396,13 @@ impl LayerCorners for GerberLayerData {
         };
         let mut tool = None;
         for command in commands.iter() {
-            if let Command::FunctionCode(FunctionCode::DCode(DCode::SelectAperture(ap))) = command {
-                if let Some(ap) = self.apertures.get(&ap) {
-                    tool = Some(ap.get_corners());
-                }
+            if let Command::FunctionCode(FunctionCode::DCode(DCode::SelectAperture(ap))) = command
+                && let Some(ap) = self.apertures.get(ap)
+            {
+                tool = Some(ap.get_corners());
             }
-            if let Command::FunctionCode(FunctionCode::DCode(DCode::Operation(op))) = command {
-                match op {
-                    Operation::Move(Some(coords))
-                    | Operation::Flash(Some(coords))
-                    | Operation::Interpolate(Some(coords), _) => {
-                        min_max(&mut min, &mut max, coords, unit, &tool);
-                    }
-                    _ => {}
-                }
+            if let Some(coords) = cmd_into_coords(command) {
+                min_max(&mut min, &mut max, coords, unit, &tool);
             }
         }
         (min, max)
@@ -430,19 +432,17 @@ impl LayerTransform for (&Unit, &mut Vec<Command>) {
         let to_unit = |x: f64| CoordinateNumber::try_from(x.mm_to_unit(unit)).ok();
         let to_mm = |x: &CoordinateNumber| f64::from(*x).to_mm(unit);
         for command in cmds.iter_mut() {
-            if let Command::FunctionCode(FunctionCode::DCode(DCode::Operation(op))) = command {
-                match op {
-                    Operation::Move(Some(coords))
-                    | Operation::Flash(Some(coords))
-                    | Operation::Interpolate(Some(coords), _) => {
-                        if let Some(x) = coords.x {
-                            coords.x = to_unit(to_mm(&x) + transform.x);
-                        }
-                        if let Some(y) = coords.y {
-                            coords.y = to_unit(to_mm(&y) + transform.y);
-                        }
-                    }
-                    _ => {}
+            if let Command::FunctionCode(FunctionCode::DCode(DCode::Operation(
+                Operation::Move(Some(coords))
+                | Operation::Flash(Some(coords))
+                | Operation::Interpolate(Some(coords), _),
+            ))) = command
+            {
+                if let Some(x) = coords.x {
+                    coords.x = to_unit(to_mm(&x) + transform.x);
+                }
+                if let Some(y) = coords.y {
+                    coords.y = to_unit(to_mm(&y) + transform.y);
                 }
             }
         }
@@ -574,16 +574,23 @@ impl Optimize for Command {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::File;
-    use crate::Size;
     use super::*;
+    use crate::Size;
+    use std::fs::File;
 
     #[test]
     fn test_layer_size() -> Result<(), Box<dyn std::error::Error>> {
         let layer = GerberLayerData::from_type(
             LayerType::Dimensions,
-            BufReader::new(File::open("test/test_outline.gbr")?))?;
-        assert_eq!(layer.get_size(), Size { width: 112.0, height: 132.0 });
+            BufReader::new(File::open("test/test_outline.gbr")?),
+        )?;
+        assert_eq!(
+            layer.get_size(),
+            Size {
+                width: 112.0,
+                height: 132.0
+            }
+        );
         Ok(())
     }
 }

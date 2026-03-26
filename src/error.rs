@@ -16,4 +16,8 @@ pub enum ParseError {
     GerberParseError(#[from] gerber_parser::ParseError),
     #[error("Failed to parse a Excellon layer: {}", 0)]
     ExcellonParseError(io::Error),
+    #[error("No coordinate found in: {}", 0)]
+    FormatMissing(String),
+    #[error("Type not found in file attributes")]
+    TypeNotFound,
 }
