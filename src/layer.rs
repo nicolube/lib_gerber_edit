@@ -124,7 +124,7 @@ impl LayerStepAndRepeat for LayerData {
 ///
 /// All Layers except Drill are usually gerber layers
 /// The grill layer is a excellon drill file
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum LayerType {
     Top,
