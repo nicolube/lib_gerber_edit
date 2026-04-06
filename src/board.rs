@@ -3,7 +3,7 @@ use crate::{LayerCorners, LayerMerge, LayerTransform, Pos, error, excellon_forma
 use gerber_parser::gerber_types::{Command, CommentContent, FunctionCode, GCode, GerberResult};
 use std::fs;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 /// Board, a collection of layers of any type
 #[derive(Debug, Clone, PartialEq)]
@@ -69,8 +69,13 @@ impl Board {
                 if matches!(entry.file_type(), Ok(ty) if ty.is_file()) && ty.is_ok() {
                     Some(
                         File::open(entry.path().as_path())
-                            .map(|f| (name, f))
-                            .map_err(|e| e.into()),
+                            .map(|f| (name.clone(), f))
+                            .map_err(|e| {
+                                error::Error::Io(io::Error::new(
+                                    e.kind(),
+                                    format!("'{}': {}", name, e),
+                                ))
+                            }),
                     )
                 } else {
                     None

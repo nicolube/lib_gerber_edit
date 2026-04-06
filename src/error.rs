@@ -2,22 +2,22 @@ use std::io;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-    #[error("Failed to derive error for file: {}", 0)]
+    #[error("Cannot determine layer type for file: '{0}'")]
     InvalidType(String),
-    #[error("Io Error: {}", 0)]
+    #[error("IO error: {0}")]
     Io(#[from] io::Error),
-    #[error("Failed to parse: {}: {}", 1, 0)]
+    #[error("Failed to parse '{1}': {0}")]
     ParseError(ParseError, String),
 }
 
 #[derive(thiserror::Error, Debug)]
 pub enum ParseError {
-    #[error("Failed to parse a Gerber layer: {} in {}", 0, 1)]
+    #[error("Failed to parse Gerber layer: {0}")]
     GerberParseError(#[from] gerber_parser::ParseError),
-    #[error("Failed to parse a Excellon layer: {}", 0)]
+    #[error("Failed to parse an Excellon layer: {0}")]
     ExcellonParseError(io::Error),
-    #[error("No coordinate found in: {}", 0)]
+    #[error("Missing coordinate format specification in layer '{0}'")]
     FormatMissing(String),
-    #[error("Type not found in file attributes")]
+    #[error("Cannot determine layer type from file attributes")]
     TypeNotFound,
 }
