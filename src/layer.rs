@@ -37,17 +37,17 @@ impl LayerData {
     {
         Ok(match ty {
             LayerType::Drill => (
-                ty.clone(),
+                ty,
                 LayerData::Excellon(
                     parse_excellon(reader).map_err(ParseError::ExcellonParseError)?,
                 ),
             ),
             LayerType::UndefinedGerber => {
                 let layer = GerberLayerData::from_commands(reader)?;
-                (layer.layer_type.clone(), LayerData::Gerber(layer))
+                (layer.layer_type, LayerData::Gerber(layer))
             }
             _ => (
-                ty.clone(),
+                ty,
                 LayerData::Gerber(GerberLayerData::from_type(ty, reader)?),
             ),
         })
@@ -67,7 +67,7 @@ impl LayerData {
 
     pub fn get_type(&self) -> LayerType {
         match self {
-            LayerData::Gerber(layer) => layer.layer_type.clone(),
+            LayerData::Gerber(layer) => layer.layer_type,
             LayerData::Excellon(_) => LayerType::Drill,
             LayerData::Info(_) => LayerType::Info,
         }

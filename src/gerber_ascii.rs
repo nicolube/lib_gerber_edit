@@ -86,7 +86,12 @@ impl AsciiText {
     /// to the alignment anchor specified by [`h_align`](Self::h_align) and
     /// [`v_align`](Self::v_align).
     pub fn build(&self, text: impl AsRef<str>, layer_type: LayerType) -> GerberLayerData {
-        let Self { size, ratio, h_align, v_align } = self;
+        let Self {
+            size,
+            ratio,
+            h_align,
+            v_align,
+        } = self;
         let (size, ratio) = (*size, *ratio);
         let text = text.as_ref();
         let height: f64 = TEXT_HEIGHT / 6.0 * size;
@@ -148,7 +153,10 @@ impl AsciiText {
             VAlign::Top => -max.y,
         };
         if x_shift != 0.0 || y_shift != 0.0 {
-            layer.transform(&Pos { x: x_shift, y: y_shift });
+            layer.transform(&Pos {
+                x: x_shift,
+                y: y_shift,
+            });
         }
 
         layer
@@ -210,8 +218,8 @@ mod tests {
 
     #[test]
     fn test_ascii() -> Result<(), Box<dyn std::error::Error>> {
-        let layer = AsciiText::new(3.0)
-            .build("~Hello \"World\" 0123456789", LayerType::SilkScreenTop);
+        let layer =
+            AsciiText::new(3.0).build("~Hello \"World\" 0123456789", LayerType::SilkScreenTop);
         fs::create_dir_all("output")?;
         let file = fs::File::create("output/ascii.gbr")?;
         let mut writer = BufWriter::new(file);

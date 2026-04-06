@@ -363,6 +363,105 @@ fn cmd_into_coords(command: &Command) -> Option<&Coordinates> {
     }
 }
 
+/// Updates a position in-place from modal coordinates (omitted axis keeps its current value).
+fn update_pos(pos: &mut Pos, coords: &Coordinates, unit: &Unit) {
+    if let Some(x) = coords.x {
+        pos.x = f64::from(x.to_mm(unit));
+    }
+    if let Some(y) = coords.y {
+        pos.y = f64::from(y.to_mm(unit));
+    }
+}
+
+/// Returns the bounding box of a circular arc.
+///
+/// `offset` is the I/J vector from `start` to the arc center.
+/// Cardinal axis-extremes of the circle (0°, 90°, 180°, 270°) are included
+/// when they fall within the arc's sweep.
+///
+/// # Spec compliance (RS-274X §5.3)
+/// This function correctly handles **multi-quadrant (G75)** arcs where I/J are
+/// signed offsets. **Single-quadrant (G74)** arcs are not fully handled: in G74
+/// mode I/J are unsigned magnitudes and the actual direction to the center is
+/// determined implicitly from which of the four possible centers lies on the
+/// perpendicular bisector of the chord. Since the parser delivers the raw
+/// positive values, this function would only compute the correct center when
+/// the center lies in the +X/+Y direction from start. In practice nearly all
+/// modern Gerber files use G75, and the spec itself recommends always
+/// specifying the quadrant mode explicitly.
+fn arc_corners(
+    start: &Pos,
+    end: &Pos,
+    offset: &CoordinateOffset,
+    unit: &Unit,
+    mode: InterpolationMode,
+) -> (Pos, Pos) {
+    use std::f64::consts::{FRAC_PI_2, PI};
+
+    let i = offset.x.map(|v| f64::from(v.to_mm(unit))).unwrap_or(0.0);
+    let j = offset.y.map(|v| f64::from(v.to_mm(unit))).unwrap_or(0.0);
+
+    let cx = start.x + i;
+    let cy = start.y + j;
+    let radius = (i * i + j * j).sqrt();
+
+    let start_angle = (start.y - cy).atan2(start.x - cx);
+    let end_angle = (end.y - cy).atan2(end.x - cx);
+
+    let mut min_x = start.x.min(end.x);
+    let mut min_y = start.y.min(end.y);
+    let mut max_x = start.x.max(end.x);
+    let mut max_y = start.y.max(end.y);
+
+    for (angle, px, py) in [
+        (0.0_f64, cx + radius, cy),
+        (FRAC_PI_2, cx, cy + radius),
+        (PI, cx - radius, cy),
+        (-FRAC_PI_2, cx, cy - radius),
+    ] {
+        if angle_in_arc(start_angle, end_angle, angle, mode) {
+            min_x = min_x.min(px);
+            min_y = min_y.min(py);
+            max_x = max_x.max(px);
+            max_y = max_y.max(py);
+        }
+    }
+
+    (Pos { x: min_x, y: min_y }, Pos { x: max_x, y: max_y })
+}
+
+/// Returns true if `angle` (radians) is swept when travelling from `start` to
+/// `end` in the given circular interpolation direction.
+fn angle_in_arc(start: f64, end: f64, angle: f64, mode: InterpolationMode) -> bool {
+    use std::f64::consts::PI;
+
+    let norm = |a: f64| {
+        let a = a.rem_euclid(2.0 * PI);
+        if a > PI { a - 2.0 * PI } else { a }
+    };
+
+    // For CW, sweeping clockwise from start→end is the same as CCW from end→start.
+    let (arc_start, arc_end) = match mode {
+        InterpolationMode::CounterclockwiseCircular => (norm(start), norm(end)),
+        InterpolationMode::ClockwiseCircular => (norm(end), norm(start)),
+        InterpolationMode::Linear => return false,
+    };
+
+    let angle = norm(angle);
+
+    // Equal start/end means a full circle.
+    if (arc_start - arc_end).abs() < 1e-10 {
+        return true;
+    }
+
+    if arc_start <= arc_end {
+        angle >= arc_start && angle <= arc_end
+    } else {
+        // Arc crosses the ±π discontinuity.
+        angle >= arc_start || angle <= arc_end
+    }
+}
+
 impl LayerCorners for (&Unit, &Vec<Command>) {
     fn get_corners(&self) -> (Pos, Pos) {
         let (unit, cmds) = self;
@@ -382,10 +481,10 @@ impl LayerCorners for (&Unit, &Vec<Command>) {
         (min, max)
     }
 }
+
 impl LayerCorners for GerberLayerData {
     fn get_corners(&self) -> (Pos, Pos) {
         let unit = &self.unit;
-        let commands = &self.commands;
         let mut min = Pos {
             x: f64::MAX,
             y: f64::MAX,
@@ -395,14 +494,50 @@ impl LayerCorners for GerberLayerData {
             y: f64::MIN,
         };
         let mut tool = None;
-        for command in commands.iter() {
-            if let Command::FunctionCode(FunctionCode::DCode(DCode::SelectAperture(ap))) = command
-                && let Some(ap) = self.apertures.get(ap)
-            {
-                tool = Some(ap.get_corners());
-            }
-            if let Some(coords) = cmd_into_coords(command) {
-                min_max(&mut min, &mut max, coords, unit, &tool);
+        let mut current_pos = Pos::default();
+        let mut interp_mode = InterpolationMode::Linear;
+
+        for command in self.commands.iter() {
+            match command {
+                Command::FunctionCode(FunctionCode::DCode(DCode::SelectAperture(ap))) => {
+                    if let Some(ap) = self.apertures.get(ap) {
+                        tool = Some(ap.get_corners());
+                    }
+                }
+                Command::FunctionCode(FunctionCode::GCode(GCode::InterpolationMode(mode))) => {
+                    interp_mode = *mode;
+                }
+                Command::FunctionCode(FunctionCode::DCode(DCode::Operation(op))) => match op {
+                    Operation::Move(Some(coords)) => {
+                        update_pos(&mut current_pos, coords, unit);
+                        // Include move targets so stroke starts are bounded (no tool: not drawing).
+                        min_max(&mut min, &mut max, coords, unit, &None);
+                    }
+                    Operation::Flash(Some(coords)) => {
+                        update_pos(&mut current_pos, coords, unit);
+                        min_max(&mut min, &mut max, coords, unit, &tool);
+                    }
+                    Operation::Interpolate(Some(end_coords), Some(offset))
+                        if interp_mode != InterpolationMode::Linear =>
+                    {
+                        let start = current_pos.clone();
+                        update_pos(&mut current_pos, end_coords, unit);
+                        let (arc_min, arc_max) =
+                            arc_corners(&start, &current_pos, offset, unit, interp_mode);
+                        let default = (Pos::default(), Pos::default());
+                        let (tool_min, tool_max) = tool.as_ref().unwrap_or(&default);
+                        min.x = min.x.min(arc_min.x + tool_min.x);
+                        min.y = min.y.min(arc_min.y + tool_min.y);
+                        max.x = max.x.max(arc_max.x + tool_max.x);
+                        max.y = max.y.max(arc_max.y + tool_max.y);
+                    }
+                    Operation::Interpolate(Some(coords), _) => {
+                        update_pos(&mut current_pos, coords, unit);
+                        min_max(&mut min, &mut max, coords, unit, &tool);
+                    }
+                    _ => {}
+                },
+                _ => {}
             }
         }
         (min, max)
@@ -477,12 +612,14 @@ macro_rules! coord_scaling {
     ($name:ident) => {
         impl LayerScale for $name {
             fn scale(&mut self, x: f64, y: f64) {
-                self.x = self
-                    .x
-                    .map(|v| CoordinateNumber::try_from(f64::from(v) * x).expect("coordinate overflow: scale factor too large"));
-                self.y = self
-                    .y
-                    .map(|v| CoordinateNumber::try_from(f64::from(v) * y).expect("coordinate overflow: scale factor too large"));
+                self.x = self.x.map(|v| {
+                    CoordinateNumber::try_from(f64::from(v) * x)
+                        .expect("coordinate overflow: scale factor too large")
+                });
+                self.y = self.y.map(|v| {
+                    CoordinateNumber::try_from(f64::from(v) * y)
+                        .expect("coordinate overflow: scale factor too large")
+                });
             }
         }
     };
@@ -591,6 +728,162 @@ mod tests {
                 width: 112.0,
                 height: 132.0
             }
+        );
+        Ok(())
+    }
+
+    // ── Arc bounding-box tests ────────────────────────────────────────────────
+    //
+    // All tests use multi-quadrant mode (G75) as required by RS-274X §5.3.3.
+    // Coordinates are in FSLAX46Y46 format (1 unit = 10⁻⁶ mm), so
+    // 1 mm = 1_000_000 units.  Aperture diameter 0.1 mm → half-width 0.05 mm.
+
+    /// RS-274X §5.3.4 worked example: CCW arc from (3,−2) to (−3,−2).
+    /// Center offset I=−3 J=4 → center (0, 2), radius 5.
+    /// Arc sweeps ~286° CCW through the top; the bottommost cardinal (0,−3)
+    /// is **not** swept and must not inflate y_min.
+    ///
+    /// Verified manually:
+    ///   start_angle  = atan2(−4, 3)  ≈ −53°
+    ///   end_angle    = atan2(−4, −3) ≈ −127°  (normalised ≈ −2.21 rad)
+    ///   CCW: sweeps from −53° increasing → passes 0°, 90°, 180° before
+    ///        reaching −127°, so right (5,2), top (0,7), left (−5,2) included.
+    ///   −90° (bottom, (0,−3)) is NOT in [−53°, −127°] CCW → excluded. ✓
+    ///
+    /// Expected bbox (tool half = 0.05 mm):
+    ///   x ∈ [−5.05, 5.05],  y ∈ [−2.05, 7.05]
+    #[test]
+    fn test_arc_ccw_through_top() -> Result<(), Box<dyn std::error::Error>> {
+        let gbr = "\
+%FSLAX46Y46*%
+%MOMM*%
+%ADD10C,0.100000*%
+D10*
+G75*
+G01*
+X3000000Y-2000000D02*
+G03*
+X-3000000Y-2000000I-3000000J4000000D01*
+M02*
+";
+        let layer = GerberLayerData::from_type(LayerType::Top, BufReader::new(gbr.as_bytes()))?;
+        let (min, max) = layer.get_corners();
+        let eps = 1e-6;
+        assert!(
+            (min.x - (-5.05)).abs() < eps,
+            "min.x: expected -5.05, got {}",
+            min.x
+        );
+        assert!(
+            (max.x - 5.05).abs() < eps,
+            "max.x: expected  5.05, got {}",
+            max.x
+        );
+        assert!(
+            (min.y - (-2.05)).abs() < eps,
+            "min.y: expected -2.05, got {}",
+            min.y
+        );
+        assert!(
+            (max.y - 7.05).abs() < eps,
+            "max.y: expected  7.05, got {}",
+            max.y
+        );
+        Ok(())
+    }
+
+    /// CW quarter-circle from (5, 0) to (0, −5), center (0, 0), radius 5.
+    /// Center offset I=−5 J=0.
+    /// Arc sweeps 90° CW through the fourth quadrant only.
+    ///
+    /// Cardinals at 0° (5, 0) and −90° (0, −5) are on the arc boundary.
+    /// Cardinals at 90° and 180° are NOT swept → must not inflate the bbox.
+    ///
+    /// Expected bbox (tool half = 0.05 mm):
+    ///   x ∈ [−0.05, 5.05],  y ∈ [−5.05, 0.05]
+    #[test]
+    fn test_arc_cw_quarter() -> Result<(), Box<dyn std::error::Error>> {
+        let gbr = "\
+%FSLAX46Y46*%
+%MOMM*%
+%ADD10C,0.100000*%
+D10*
+G75*
+G01*
+X5000000Y0D02*
+G02*
+X0Y-5000000I-5000000J0D01*
+M02*
+";
+        let layer = GerberLayerData::from_type(LayerType::Top, BufReader::new(gbr.as_bytes()))?;
+        let (min, max) = layer.get_corners();
+        let eps = 1e-6;
+        assert!(
+            (min.x - (-0.05)).abs() < eps,
+            "min.x: expected -0.05, got {}",
+            min.x
+        );
+        assert!(
+            (max.x - 5.05).abs() < eps,
+            "max.x: expected  5.05, got {}",
+            max.x
+        );
+        assert!(
+            (min.y - (-5.05)).abs() < eps,
+            "min.y: expected -5.05, got {}",
+            min.y
+        );
+        assert!(
+            (max.y - 0.05).abs() < eps,
+            "max.y: expected  0.05, got {}",
+            max.y
+        );
+        Ok(())
+    }
+
+    /// Full circle: start == end in multi-quadrant mode means 360° (§5.3.3).
+    /// Circle centred at (0, 0), radius 5: start and end both at (5, 0),
+    /// center offset I=−5 J=0.
+    /// All four cardinals must be included.
+    ///
+    /// Expected bbox (tool half = 0.05 mm):
+    ///   x ∈ [−5.05, 5.05],  y ∈ [−5.05, 5.05]
+    #[test]
+    fn test_arc_full_circle() -> Result<(), Box<dyn std::error::Error>> {
+        let gbr = "\
+%FSLAX46Y46*%
+%MOMM*%
+%ADD10C,0.100000*%
+D10*
+G75*
+G01*
+X5000000Y0D02*
+G03*
+X5000000Y0I-5000000J0D01*
+M02*
+";
+        let layer = GerberLayerData::from_type(LayerType::Top, BufReader::new(gbr.as_bytes()))?;
+        let (min, max) = layer.get_corners();
+        let eps = 1e-6;
+        assert!(
+            (min.x - (-5.05)).abs() < eps,
+            "min.x: expected -5.05, got {}",
+            min.x
+        );
+        assert!(
+            (max.x - 5.05).abs() < eps,
+            "max.x: expected  5.05, got {}",
+            max.x
+        );
+        assert!(
+            (min.y - (-5.05)).abs() < eps,
+            "min.y: expected -5.05, got {}",
+            min.y
+        );
+        assert!(
+            (max.y - 5.05).abs() < eps,
+            "max.y: expected  5.05, got {}",
+            max.y
         );
         Ok(())
     }
