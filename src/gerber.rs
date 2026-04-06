@@ -411,17 +411,18 @@ impl LayerCorners for GerberLayerData {
 
 impl LayerCorners for Aperture {
     fn get_corners(&self) -> (Pos, Pos) {
-        let (h, w) = match self {
+        // Minimum aperture size (mm) to include in bounding box calculations.
+        // Thin traces/lines are excluded so they don't inflate board dimensions.
+        const MIN_TOOL_SIZE: f64 = 0.1;
+        let (x_size, y_size) = match self {
             Aperture::Circle(c) => (c.diameter, c.diameter),
             Aperture::Obround(r) | Aperture::Rectangle(r) => (r.x, r.y),
             Aperture::Polygon(_) | Aperture::Macro(_, _) => (0.0, 0.0),
         };
-        // If line is very thin, it can be considered 0.
-        // This is mostly done to ignore line with of dimensions
-        if h < 0.1 && w < 0.1 {
+        if x_size < MIN_TOOL_SIZE && y_size < MIN_TOOL_SIZE {
             return (Pos::default(), Pos::default());
         }
-        let (x, y) = (h / 2.0, w / 2.0);
+        let (x, y) = (x_size / 2.0, y_size / 2.0);
         (Pos { x: -x, y: -y }, Pos { x, y })
     }
 }
@@ -478,10 +479,10 @@ macro_rules! coord_scaling {
             fn scale(&mut self, x: f64, y: f64) {
                 self.x = self
                     .x
-                    .map(|v| CoordinateNumber::try_from(f64::from(v) * x).unwrap());
+                    .map(|v| CoordinateNumber::try_from(f64::from(v) * x).expect("coordinate overflow: scale factor too large"));
                 self.y = self
                     .y
-                    .map(|v| CoordinateNumber::try_from(f64::from(v) * y).unwrap());
+                    .map(|v| CoordinateNumber::try_from(f64::from(v) * y).expect("coordinate overflow: scale factor too large"));
             }
         }
     };
