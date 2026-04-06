@@ -124,48 +124,50 @@ impl AsciiText {
                 GCode::InterpolationMode(InterpolationMode::Linear),
             )));
 
-        let lines = text.lines().count();
-        let mut pos = Pos {
-            x: 0.0,
-            y: lines.saturating_sub(1) as f64 * height,
-        };
-        for c in text.chars() {
-            match c {
-                ' ' => pos.x += 0.6 * size,
-                '\n' => {
-                    pos.y -= height;
-                    pos.x = 0.0;
+        let lines: Vec<&str> = text.lines().collect();
+        let num_lines = lines.len();
+
+        for (line_idx, line) in lines.iter().enumerate() {
+            let y = num_lines.saturating_sub(1 + line_idx) as f64 * height;
+
+            let mut line_cmds: Vec<Command> = Vec::new();
+            let mut pos = Pos { x: 0.0, y };
+            for c in line.chars() {
+                match c {
+                    ' ' => pos.x += 0.6 * size,
+                    _ if ('!'..='~').contains(&c) => {
+                        let i = c as usize - '!' as usize;
+                        let mut char = CHARS[i].clone();
+                        (&layer.coordinate_format, &mut char).scale(size / 3.0, size / 3.0);
+                        let width = (&Unit::Millimeters, &char).get_size().width;
+                        (&Unit::Millimeters, &mut char).transform(&pos);
+                        line_cmds.extend(char);
+                        pos.x += width + 0.3 * size;
+                    }
+                    _ => {}
                 }
-                _ if ('!'..='~').contains(&c) => {
-                    let i = c as usize - '!' as usize;
-                    let mut char = CHARS[i].clone();
-                    let scale = size / 3.0;
-                    (&layer.coordinate_format, &mut char).scale(scale, scale);
-                    let width = (&Unit::Millimeters, &char).get_size().width;
-                    (&Unit::Millimeters, &mut char).transform(&pos);
-                    layer.commands.extend(char);
-                    pos.x += width + 0.3 * size;
-                }
-                _ => {}
             }
+
+            let (min, max) = (&Unit::Millimeters, &line_cmds).get_corners();
+            let x_shift = match h_align {
+                HAlign::Left => -min.x,
+                HAlign::Center => -(min.x + max.x) / 2.0,
+                HAlign::Right => -max.x,
+            };
+            if x_shift != 0.0 {
+                (&Unit::Millimeters, &mut line_cmds).transform(&Pos { x: x_shift, y: 0.0 });
+            }
+            layer.commands.extend(line_cmds);
         }
 
-        let (min, max) = layer.get_corners();
-        let x_shift = match h_align {
-            HAlign::Left => -min.x,
-            HAlign::Center => -(min.x + max.x) / 2.0,
-            HAlign::Right => -max.x,
-        };
+        let total_height = num_lines as f64 * height;
         let y_shift = match v_align {
-            VAlign::Bottom => -min.y,
-            VAlign::Middle => -(min.y + max.y) / 2.0,
-            VAlign::Top => -max.y,
+            VAlign::Bottom => 0.0,
+            VAlign::Middle => -total_height / 2.0,
+            VAlign::Top => -total_height,
         };
-        if x_shift != 0.0 || y_shift != 0.0 {
-            layer.transform(&Pos {
-                x: x_shift,
-                y: y_shift,
-            });
+        if y_shift != 0.0 {
+            layer.transform(&Pos { x: 0.0, y: y_shift });
         }
 
         layer
