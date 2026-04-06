@@ -340,6 +340,35 @@ impl From<&Layer> for LayerData {
     }
 }
 
+impl From<GerberLayerData> for Layer {
+    /// Wraps a [`GerberLayerData`] in a [`Layer`].
+    ///
+    /// The `name` is set to the default file extension for the layer type
+    /// (e.g. `"gto"` for `SilkScreenTop`). Override `layer.name` afterwards
+    /// if a specific filename is needed.
+    fn from(data: GerberLayerData) -> Self {
+        Layer {
+            name: data.layer_type.file_ending().to_string(),
+            ty: data.layer_type,
+            data: LayerData::Gerber(data),
+        }
+    }
+}
+
+impl From<ExcellonLayerData> for Layer {
+    /// Wraps an [`ExcellonLayerData`] in a [`Layer`].
+    ///
+    /// The `name` is set to `"drl"`. Override `layer.name` afterwards if a
+    /// specific filename is needed.
+    fn from(data: ExcellonLayerData) -> Self {
+        Layer {
+            name: LayerType::Drill.file_ending().to_string(),
+            ty: LayerType::Drill,
+            data: LayerData::Excellon(data),
+        }
+    }
+}
+
 #[cfg(feature = "serde")]
 mod serde {
     use crate::layer::{Layer, LayerData};

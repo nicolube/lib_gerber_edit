@@ -45,7 +45,7 @@ pub enum VAlign {
 /// Reusable format configuration for rendering ASCII text as a Gerber layer
 ///
 /// # Example
-/// ```ignore
+/// ```rs
 /// let fmt = AsciiText::new(3.0).h_align(HAlign::Center);
 /// let layer_a = fmt.build("Rev 1.0", LayerType::SilkScreenTop);
 /// let layer_b = fmt.build("Rev 2.0", LayerType::SilkScreenBottom);

@@ -1,3 +1,5 @@
+use crate::excellon_format::ExcellonLayerData;
+use crate::gerber::GerberLayerData;
 use crate::layer::{Layer, LayerData, LayerType};
 use crate::{LayerCorners, LayerMerge, LayerTransform, Pos, error, excellon_format};
 use gerber_parser::gerber_types::{Command, CommentContent, FunctionCode, GCode, GerberResult};
@@ -110,9 +112,13 @@ impl Board {
         self.0.iter_mut().collect()
     }
 
-    /// Inserts `layer` into the board, or merges it into the existing layer of
+    /// Inserts a layer into the board, or merges it into the existing layer of
     /// the same type if one is already present.
-    pub fn add_layer(&mut self, layer: Layer) {
+    ///
+    /// Accepts anything that converts into a [`Layer`] (e.g. [`GerberLayerData`],
+    /// [`ExcellonLayerData`](crate::excellon_format::ExcellonLayerData)).
+    pub fn add_layer(&mut self, layer: impl Into<Layer>) {
+        let layer = layer.into();
         let existing = self.0.iter_mut().find(|e| e.ty == layer.ty);
         if let Some(existing) = existing {
             existing.data.merge(&layer.data)
@@ -209,6 +215,34 @@ impl LayerTransform for Board {
         for layer in &mut self.0 {
             layer.data.transform(transform);
         }
+    }
+}
+
+impl From<Layer> for Board {
+    /// Creates a board containing a single layer.
+    fn from(layer: Layer) -> Self {
+        Self(vec![layer])
+    }
+}
+
+impl From<Vec<Layer>> for Board {
+    /// Creates a board from a pre-built list of layers.
+    fn from(layers: Vec<Layer>) -> Self {
+        Self(layers)
+    }
+}
+
+impl From<GerberLayerData> for Board {
+    /// Creates a board containing a single Gerber layer.
+    fn from(data: GerberLayerData) -> Self {
+        Self::from(Layer::from(data))
+    }
+}
+
+impl From<ExcellonLayerData> for Board {
+    /// Creates a board containing a single Excellon drill layer.
+    fn from(data: ExcellonLayerData) -> Self {
+        Self::from(Layer::from(data))
     }
 }
 

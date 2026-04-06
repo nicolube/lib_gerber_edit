@@ -107,11 +107,19 @@ pub trait LayerScale {
 }
 
 /// Layer concatenation.
-pub trait LayerMerge {
+pub trait LayerMerge: Sized {
     /// Appends `other` into `self`.
     ///
     /// Aperture and tool IDs are remapped to avoid collisions.
     fn merge(&mut self, other: &Self);
+
+    /// Converts `other` into `Self` and merges it.
+    ///
+    /// Convenience wrapper around [`merge`](Self::merge) that accepts any type
+    /// that can be converted into `Self` via [`Into`].
+    fn merge_from(&mut self, other: impl Into<Self>) {
+        self.merge(&other.into());
+    }
 }
 
 /// Grid replication.
