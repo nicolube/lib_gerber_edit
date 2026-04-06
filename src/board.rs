@@ -5,16 +5,21 @@ use std::fs;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
-/// Board, a collection of layers of any type
+/// A complete PCB stackup: an ordered collection of [`Layer`]s of any type.
+///
+/// Layers are identified by their [`LayerType`]; each type may appear at most
+/// once. Use [`Board::add_layer`] to insert or merge a layer, and
+/// [`LayerMerge::merge`] to combine two boards that share the same layer set.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Board(Vec<Layer>);
 
 impl Board {
-    /// Loads board from a Vec of layers file-name and a reader of the files data
+    /// Parses a board from a list of `(filename, reader)` pairs.
     ///
-    /// Layer type will be evaluated from file extension.
-    /// If gerber layer type cannot be evaluated by file extension, type will be read from
-    /// gerber FileAttribute.
+    /// The layer type is inferred from the file extension (e.g. `.gtl` → `Top`).
+    /// For `.gbr` files the type is read from the `FileAttribute` embedded in
+    /// the Gerber data. Returns an error if any file's extension is unrecognised
+    /// or its content fails to parse.
     pub fn new(data: Vec<(&str, BufReader<&mut dyn Read>)>) -> crate::Result<Self> {
         let mut result = Vec::new();
         for (name, reader) in data {
@@ -35,12 +40,12 @@ impl Board {
         Ok(Self(result))
     }
 
-    /// Returns an empty layer
+    /// Creates a board with no layers.
     pub fn empty() -> Self {
         Self(Vec::new())
     }
 
-    /// Adds a comment to all layers
+    /// Appends a comment command to every layer that supports it (Gerber and Excellon).
     pub fn comment(&mut self, txt: String) {
         for layer in self.0.iter_mut() {
             match &mut layer.data {
@@ -58,7 +63,10 @@ impl Board {
         }
     }
 
-    /// Loads all layers it can from a given folder
+    /// Loads every file with a recognised Gerber or Excellon extension from `path`.
+    ///
+    /// Files with unrecognised extensions are silently skipped. Returns an error
+    /// if any recognised file fails to open or parse.
     pub fn from_folder(path: &Path) -> crate::Result<Self> {
         let folder = fs::read_dir(path)?;
         let mut files = folder
@@ -92,17 +100,18 @@ impl Board {
         Self::new(reader)
     }
 
-    /// Returns inner lasers
+    /// Returns references to all layers in insertion order.
     pub fn layers(&self) -> Vec<&Layer> {
         self.0.iter().collect()
     }
 
-    /// Returns inner lasers mutable
+    /// Returns mutable references to all layers in insertion order.
     pub fn layers_mut(&mut self) -> Vec<&mut Layer> {
         self.0.iter_mut().collect()
     }
 
-    /// Merges layer if it already exists or adds a new one
+    /// Inserts `layer` into the board, or merges it into the existing layer of
+    /// the same type if one is already present.
     pub fn add_layer(&mut self, layer: Layer) {
         let existing = self.0.iter_mut().find(|e| e.ty == layer.ty);
         if let Some(existing) = existing {
@@ -112,19 +121,21 @@ impl Board {
         }
     }
 
-    /// Returns a given layer by its type
+    /// Returns the layer with the given type, or `None` if not present.
     pub fn get_layer(&self, ty: &LayerType) -> Option<&Layer> {
         self.0.iter().find(|layer| &layer.ty == ty)
     }
 
-    /// Returns a given layer by its type mutbale
+    /// Returns a mutable reference to the layer with the given type, or `None` if not present.
     pub fn get_layer_mut(&mut self, ty: &LayerType) -> Option<&mut Layer> {
         self.0.iter_mut().find(|layer| &layer.ty == ty)
     }
 
-    /// Writes layers to a given output
+    /// Writes all layers using a caller-supplied writer factory.
     ///
-    /// @see Self::write_to_folder for an example
+    /// `f` is called once per layer and must return an open `BufWriter`.
+    /// Use [`write_to_folder`](Self::write_to_folder) for the common case of
+    /// writing files to a directory.
     pub fn write_to<T>(
         &self,
         f: &mut impl FnMut(&Layer) -> std::io::Result<BufWriter<T>>,
@@ -139,7 +150,9 @@ impl Board {
         Ok(())
     }
 
-    /// Writes layers to a given folder
+    /// Writes all layers to `path`, creating the directory if necessary.
+    ///
+    /// Each layer is written to a file named `layer.name` inside `path`.
     pub fn write_to_folder(&self, path: &Path) -> GerberResult<()> {
         fs::create_dir_all(path)?;
         let mut name_fn = |x: &Layer| {
@@ -151,9 +164,11 @@ impl Board {
 }
 
 impl LayerCorners for Board {
-    /// Returns corners of board
+    /// Returns the bounding box of the board.
     ///
-    /// Will get them by getting min and max coords of each layer
+    /// Computed as the union of all Gerber layer corners, excluding
+    /// `KeepOut`, `Info`, and `SidePlating` layers as they don't represent
+    /// physical board area. Excellon layers are also excluded.
     fn get_corners(&self) -> (Pos, Pos) {
         let mut min = Pos {
             x: f64::MAX,
@@ -189,7 +204,7 @@ impl LayerCorners for Board {
 }
 
 impl LayerTransform for Board {
-    /// Adds an offset to all layers
+    /// Translates every layer by `transform` (mm).
     fn transform(&mut self, transform: &Pos) {
         for layer in &mut self.0 {
             layer.data.transform(transform);
@@ -198,7 +213,11 @@ impl LayerTransform for Board {
 }
 
 impl LayerMerge for Board {
-    /// Will merge all layers of same type else it will insert the layer
+    /// Merges layers from `other` into the corresponding layers of `self`.
+    ///
+    /// Only layers whose [`LayerType`] already exists in `self` are updated.
+    /// Layer types present in `other` but not in `self` are ignored — use
+    /// [`add_layer`](Board::add_layer) to insert a new layer instead.
     fn merge(&mut self, other: &Self) {
         for layer in &mut self.0 {
             if let Some(other) = other.get_layer(&layer.ty) {

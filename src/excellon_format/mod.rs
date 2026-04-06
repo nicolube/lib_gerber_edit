@@ -9,15 +9,27 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::num::{ParseFloatError, ParseIntError};
 use std::str::FromStr;
 
+/// A parsed Excellon drill file, split into header and body sections.
+///
+/// Parse errors on individual lines are stored inline as `Err` variants rather
+/// than aborting the whole parse, so callers can decide how to handle them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExcellonLayerData {
+    /// Header commands (everything before `M95`/`%`), including unit and format definitions.
     pub header: Vec<Result<Command, ExcellonParseFormat>>,
+    /// Body commands (drill hits, tool changes, end-of-program, …).
     pub commands: Vec<Result<Command, ExcellonParseFormat>>,
+    /// Coordinate format derived from the header (unit, zero-suppression, digit counts).
     pub unit: UnitDefinition,
+    /// Tool definitions: tool number → drill diameter in the file's native unit.
     pub tools: HashMap<u32, f64>,
 }
 
 impl ExcellonLayerData {
+    /// Serialises the layer back to Excellon text format.
+    ///
+    /// Tool definitions are always written in sorted order immediately before
+    /// the header-end marker, regardless of their original position.
     pub fn write_to<T>(&self, writer: &mut BufWriter<T>) -> std::io::Result<()>
     where
         T: Write,
@@ -52,6 +64,7 @@ impl ExcellonLayerData {
         }
         Ok(())
     }
+    /// Returns `true` if the layer contains no drill hit coordinates.
     pub fn is_empty(&self) -> bool {
         !self
             .commands
@@ -201,6 +214,7 @@ impl LayerStepAndRepeat for ExcellonLayerData {
     }
 }
 
+/// Structured error type for individual Excellon parse failures.
 #[derive(Debug, Clone, PartialEq, Error, Display)]
 pub enum ExcellonError {
     #[display("Invalid CIC format: {}", _0)]
@@ -217,6 +231,7 @@ pub enum ExcellonError {
     InvalidGeometricCode(#[error(not(source))] u8),
     #[display("Invalid machine code: {}", _0)]
     InvalidMachineCode(#[error(not(source))] u8),
+    /// Referenced tool number has no matching `T<n>C<diam>` definition.
     #[display("Invalid tool number: {}", _0)]
     InvalidToolNumber(#[error(not(source))] u32),
     #[display("Failed to parse floating number: {}", _1)]
@@ -229,6 +244,7 @@ pub enum ExcellonError {
     Custom(#[error(not(source))] String),
 }
 
+/// A parse error annotated with its source line number and raw text.
 #[derive(Debug, Clone, Error, PartialEq, Display)]
 #[display("Excellon parse error at line {}: {}", line, content)]
 pub struct ExcellonParseFormat {
@@ -238,16 +254,26 @@ pub struct ExcellonParseFormat {
     content: String,
 }
 
+/// A single parsed Excellon command.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
+    /// `FMAT,<version>` — file format version declaration.
     FormatCode(u8),
+    /// `ICI,ON` / `ICI,OFF` — incremental (`true`) or absolute (`false`) input.
     Incremental(bool),
+    /// `METRIC` / `INCH` — unit, zero-suppression and digit-count declaration.
     UnitDefinition(UnitDefinition),
+    /// G-code (mode, dwell, input mode).
     Geometric(GeometricCode),
+    /// M-code (header delimiters, scale, end-of-program).
     Machine(MachineCode),
+    /// `X<n>Y<n>` — a drill-hit coordinate pair plus its format context.
     Coordinate(Option<f64>, Option<f64>, UnitDefinition),
+    /// `T<n>` — select tool by number.
     Tool(u32),
+    /// `T<n>C<diam>` — define a tool (number + diameter).
     ToolDefinition(ToolDefinition),
+    /// `;…` — comment line.
     Comment(String),
 }
 

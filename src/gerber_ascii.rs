@@ -1,3 +1,12 @@
+//! Vector text rendering for Gerber layers.
+//!
+//! Converts ASCII strings into RS-274X draw commands using the bundled
+//! KiCad stroke font (`gerber/kicad_font.gbr`).
+//!
+//! The entry point is [`AsciiText`]: create it once with the desired size and
+//! alignment, then call [`AsciiText::build`] as many times as needed to produce
+//! independent [`GerberLayerData`] layers.
+
 use crate::gerber::GerberLayerData;
 use crate::{LayerCorners, LayerScale, LayerTransform, LayerType, Pos};
 use gerber_parser::gerber_types::{

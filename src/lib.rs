@@ -1,3 +1,61 @@
+//! # lib_gerber_edit
+//!
+//! Manipulation library for RS-274X (Extended Gerber) and Excellon drill files,
+//! built on top of [`gerber_parser`].
+//!
+//! All lengths exposed through the public API are in **millimetres**.
+//!
+//! ## Key types
+//!
+//! | Type | Description |
+//! |------|-------------|
+//! | [`Board`](board::Board) | Collection of mixed Gerber/Excellon layers |
+//! | [`GerberLayerData`](gerber::GerberLayerData) | Single RS-274X layer |
+//! | [`AsciiText`](gerber_ascii::AsciiText) | Renders vector text into a Gerber layer |
+//! | [`LayerType`](layer::LayerType) | Identifies each layer (copper, silkscreen, drill …) |
+//!
+//! ## Traits
+//!
+//! | Trait | Description |
+//! |-------|-------------|
+//! | [`LayerCorners`] | Bounding box (`get_corners`) and size (`get_size`) |
+//! | [`LayerTransform`] | Translate by a [`Pos`] offset |
+//! | [`LayerScale`] | Scale by independent X/Y factors |
+//! | [`LayerMerge`] | Merge two layers or boards of the same type |
+//! | [`LayerStepAndRepeat`] | Tile a pattern across a grid |
+//!
+//! ## Quick start
+//!
+//! ```no_run
+//! use lib_gerber_edit::board::Board;
+//! use lib_gerber_edit::{LayerTransform, Pos};
+//! use std::path::Path;
+//!
+//! // Load every recognised layer from a directory.
+//! let mut board = Board::from_folder(Path::new("gerbers/")).unwrap();
+//!
+//! // Shift the whole board by (10 mm, 5 mm).
+//! board.transform(&Pos { x: 10.0, y: 5.0 });
+//!
+//! // Write back to a different directory.
+//! board.write_to_folder(Path::new("output/")).unwrap();
+//! ```
+//!
+//! ### Rendering text
+//!
+//! ```no_run
+//! use lib_gerber_edit::gerber_ascii::{AsciiText, HAlign, VAlign};
+//! use lib_gerber_edit::layer::LayerType;
+//!
+//! let fmt = AsciiText::new(3.0)           // 3 mm character height
+//!     .h_align(HAlign::Center)
+//!     .v_align(VAlign::Middle);
+//!
+//! // Same format object — render two different strings.
+//! let rev1 = fmt.build("Rev 1.0", LayerType::SilkScreenTop);
+//! let rev2 = fmt.build("Rev 2.0", LayerType::SilkScreenTop);
+//! ```
+
 pub mod board;
 pub mod error;
 pub mod excellon_format;
@@ -17,36 +75,51 @@ use serde::{Deserialize, Serialize};
 
 pub type Result<T> = std::result::Result<T, error::Error>;
 
+/// Bounding-box queries.
+///
+/// All coordinates are in millimetres.
 pub trait LayerCorners {
-    /// Returns size of layer calculated by corners diff
+    /// Returns the axis-aligned bounding box as `(min, max)`.
+    ///
+    /// Tool widths (aperture sizes) are taken into account, so the returned
+    /// rectangle is the true ink boundary of the layer.
+    fn get_corners(&self) -> (Pos, Pos);
+
+    /// Returns the bounding-box dimensions derived from [`get_corners`](Self::get_corners).
     fn get_size(&self) -> Size {
         let (min, max) = self.get_corners();
         let width = max.x - min.x;
         let height = max.y - min.y;
         Size { width, height }
     }
-
-    /// Returns min (x, y) and max (x, y) position
-    fn get_corners(&self) -> (Pos, Pos);
 }
 
+/// Rigid translation.
 pub trait LayerTransform {
-    /// Adds an offset to given data
+    /// Shifts all coordinates by `transform` (mm).
     fn transform(&mut self, transform: &Pos);
 }
 
+/// Uniform or anisotropic scaling.
 pub trait LayerScale {
-    /// Scales to given data by x and y
+    /// Multiplies every X coordinate by `x` and every Y coordinate by `y`.
     fn scale(&mut self, x: f64, y: f64);
 }
 
+/// Layer concatenation.
 pub trait LayerMerge {
-    /// Appends given data, tools need to be merged and remapped
+    /// Appends `other` into `self`.
+    ///
+    /// Aperture and tool IDs are remapped to avoid collisions.
     fn merge(&mut self, other: &Self);
 }
 
+/// Grid replication.
 pub trait LayerStepAndRepeat {
-    /// Multiplies given data by x and y with offset
+    /// Tiles the layer `x_repetitions × y_repetitions` times.
+    ///
+    /// The first copy is the original; subsequent copies are offset by
+    /// multiples of `offset` (mm).
     fn step_and_repeat(&mut self, x_repetitions: u32, y_repetitions: u32, offset: &Pos);
 }
 

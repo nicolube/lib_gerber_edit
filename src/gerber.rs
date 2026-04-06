@@ -16,14 +16,26 @@ use gerber_parser::gerber_types::{
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Read, Write};
 
-/// And gerber layer file separated into its components
+/// A parsed RS-274X (Extended Gerber) layer, split into its logical components.
+///
+/// Constructed via [`GerberLayerData::from_type`], [`GerberLayerData::from_commands`],
+/// or [`GerberLayerData::empty`]. Written back with [`GerberLayerData::write_to`].
+///
+/// The internal unit is always millimetres; [`GerberLayerData::to_unit`] performs
+/// conversion if the source file uses inches.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GerberLayerData {
+    /// Logical role of this layer (copper top, silkscreen bottom, …).
     pub layer_type: LayerType,
+    /// Integer/decimal digit counts used to encode coordinates in the file.
     pub coordinate_format: CoordinateFormat,
+    /// Draw commands stripped of header/footer boilerplate.
     pub commands: Vec<Command>,
+    /// Working unit (`Millimeters` after construction).
     unit: Unit,
+    /// Aperture macros keyed by name.
     pub macros: HashMap<String, Vec<MacroContent>>,
+    /// Aperture definitions keyed by D-code number.
     pub apertures: HashMap<i32, Aperture>,
 }
 
@@ -178,7 +190,11 @@ impl GerberLayerData {
         self
     }
 
-    /// Converts Layer to just a set of commands
+    /// Assembles a complete, self-contained Gerber command stream.
+    ///
+    /// Prepends the standard header (file attributes, unit, coordinate format,
+    /// aperture definitions, aperture macros) and appends `M02*` (end of file).
+    /// The draw commands are passed through the [`Optimize`] filter before output.
     fn to_commands(&self) -> Vec<Command> {
         let mut commands = vec![Command::FunctionCode(FunctionCode::GCode(GCode::Comment(
             CommentContent::String("ProAdm generated panel".to_string()),
@@ -662,7 +678,14 @@ impl From<GerberLayerData> for LayerData {
     }
 }
 
+/// Deduplicates modal Gerber state commands.
+///
+/// In RS-274X several codes are *modal* — once set, they remain active until
+/// explicitly changed. Emitting the same `SelectAperture`, `InterpolationMode`,
+/// or `QuadrantMode` command twice in a row is legal but redundant.
+/// `Optimize::optimize` strips the duplicates, shrinking the output file.
 pub trait Optimize {
+    /// Returns a filtered slice that omits consecutive repeated modal commands.
     fn optimize(values: &[Self]) -> Vec<&Self>
     where
         Self: Sized;
