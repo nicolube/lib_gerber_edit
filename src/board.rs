@@ -7,7 +7,10 @@ use log::{debug, warn};
 use std::fs;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+#[cfg(feature = "parallel")]
+use rayon::prelude::*;
 
 /// Result of loading a board from a folder.
 ///
@@ -92,48 +95,65 @@ impl Board {
     /// Returns an `Err` only if the directory itself cannot be read.
     /// Per-file open and parse failures are captured in [`LoadResult::errors`]
     /// so the caller can inspect them without losing the successfully loaded layers.
+    ///
+    /// When the `parallel` feature is enabled, files are parsed concurrently
+    /// using Rayon.
     pub fn from_folder(path: &Path) -> io::Result<LoadResult> {
+        let candidates: Vec<(String, LayerType, PathBuf)> = fs::read_dir(path)?
+            .filter_map(|e| e.ok())
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !matches!(entry.file_type(), Ok(ft) if ft.is_file()) {
+                    return None;
+                }
+                let ext = name.rsplit('.').next().unwrap_or_default();
+                match LayerType::try_from(ext) {
+                    Ok(ty) => Some((name, ty, entry.path())),
+                    Err(_) => {
+                        debug!("Skipping unrecognised file: {}", name);
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        #[cfg(feature = "parallel")]
+        let results: Vec<Result<Layer, (String, error::Error)>> =
+            candidates.into_par_iter().map(Self::parse_candidate).collect();
+
+        #[cfg(not(feature = "parallel"))]
+        let results: Vec<Result<Layer, (String, error::Error)>> =
+            candidates.into_iter().map(Self::parse_candidate).collect();
+
         let mut board = Self::empty();
         let mut errors: Vec<(String, error::Error)> = Vec::new();
-
-        for entry in fs::read_dir(path)?.filter_map(|e| e.ok()) {
-            let name = entry.file_name().to_string_lossy().to_string();
-
-            if !matches!(entry.file_type(), Ok(ft) if ft.is_file()) {
-                continue;
-            }
-
-            let ext = name.rsplit('.').next().unwrap_or_default();
-            let ty = match LayerType::try_from(ext) {
-                Ok(ty) => ty,
-                Err(_) => {
-                    debug!("Skipping unrecognised file: {}", name);
-                    continue;
-                }
-            };
-
-            let file = match File::open(entry.path()) {
-                Ok(f) => f,
-                Err(e) => {
-                    let err =
-                        error::Error::Io(io::Error::new(e.kind(), format!("'{}': {}", name, e)));
-                    warn!("Failed to open '{}': {}", name, e);
-                    errors.push((name, err));
-                    continue;
-                }
-            };
-
-            debug!("Parsing layer '{}' as {:?}", name, ty);
-            match LayerData::parse(ty, BufReader::new(file)) {
-                Ok((ty, data)) => board.0.push(Layer { ty, name, data }),
-                Err(e) => {
-                    warn!("Failed to parse '{}': {}", name, e);
-                    errors.push((name.clone(), error::Error::ParseError(e, name)));
-                }
+        for result in results {
+            match result {
+                Ok(layer) => board.0.push(layer),
+                Err(e) => errors.push(e),
             }
         }
-
         Ok(LoadResult { board, errors })
+    }
+
+    fn parse_candidate(
+        (name, ty, path): (String, LayerType, PathBuf),
+    ) -> Result<Layer, (String, error::Error)> {
+        let file = match File::open(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("Failed to open '{}': {}", name, e);
+                return Err((name, error::Error::Io(e)));
+            }
+        };
+        debug!("Parsing layer '{}' as {:?}", name, ty);
+        match LayerData::parse(ty, BufReader::new(file)) {
+            Ok((ty, data)) => Ok(Layer { ty, name, data }),
+            Err(e) => {
+                warn!("Failed to parse '{}': {}", name, e);
+                Err((name.clone(), error::Error::ParseError(e, name)))
+            }
+        }
     }
 
     /// Returns references to all layers in insertion order.
