@@ -3,10 +3,30 @@ use crate::gerber::GerberLayerData;
 use crate::layer::{Layer, LayerData, LayerType};
 use crate::{LayerCorners, LayerMerge, LayerTransform, Pos, error, excellon_format};
 use gerber_parser::gerber_types::{Command, CommentContent, FunctionCode, GCode, GerberResult};
+use log::{debug, warn};
 use std::fs;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::Path;
+
+/// Result of loading a board from a folder.
+///
+/// Successfully parsed layers are available in [`board`](LoadResult::board).
+/// Any files that could not be opened or parsed are collected in
+/// [`errors`](LoadResult::errors) as `(filename, error)` pairs, so the caller
+/// can inspect failures without losing the layers that did load correctly.
+pub struct LoadResult {
+    pub board: Board,
+    pub errors: Vec<(String, error::Error)>,
+}
+
+impl LoadResult {
+    /// Returns `true` if every recognised file was loaded without error.
+    pub fn is_ok(&self) -> bool {
+        self.errors.is_empty()
+    }
+}
+
 /// A complete PCB stackup: an ordered collection of [`Layer`]s of any type.
 ///
 /// Layers are identified by their [`LayerType`]; each type may appear at most
@@ -28,6 +48,7 @@ impl Board {
             let ty = LayerType::try_from(name.rsplit(".").next().unwrap_or_default());
             match ty {
                 Ok(ty) => {
+                    debug!("Parsing layer '{}' as {:?}", name, ty);
                     let (ty, data) = LayerData::parse(ty, reader)
                         .map_err(|err| error::Error::ParseError(err, name.to_string()))?;
                     result.push(Layer {
@@ -67,39 +88,52 @@ impl Board {
 
     /// Loads every file with a recognised Gerber or Excellon extension from `path`.
     ///
-    /// Files with unrecognised extensions are silently skipped. Returns an error
-    /// if any recognised file fails to open or parse.
-    pub fn from_folder(path: &Path) -> crate::Result<Self> {
-        let folder = fs::read_dir(path)?;
-        let mut files = folder
-            .filter_map(|entry| entry.ok())
-            .filter_map(|entry| {
-                let name = entry.file_name().to_string_lossy().to_string();
-                let ty = LayerType::try_from(name.rsplit(".").next().unwrap_or_default());
-                if matches!(entry.file_type(), Ok(ty) if ty.is_file()) && ty.is_ok() {
-                    Some(
-                        File::open(entry.path().as_path())
-                            .map(|f| (name.clone(), f))
-                            .map_err(|e| {
-                                error::Error::Io(io::Error::new(
-                                    e.kind(),
-                                    format!("'{}': {}", name, e),
-                                ))
-                            }),
-                    )
-                } else {
-                    None
+    /// Files with unrecognised extensions are silently skipped.
+    /// Returns an `Err` only if the directory itself cannot be read.
+    /// Per-file open and parse failures are captured in [`LoadResult::errors`]
+    /// so the caller can inspect them without losing the successfully loaded layers.
+    pub fn from_folder(path: &Path) -> io::Result<LoadResult> {
+        let mut board = Self::empty();
+        let mut errors: Vec<(String, error::Error)> = Vec::new();
+
+        for entry in fs::read_dir(path)?.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().to_string();
+
+            if !matches!(entry.file_type(), Ok(ft) if ft.is_file()) {
+                continue;
+            }
+
+            let ext = name.rsplit('.').next().unwrap_or_default();
+            let ty = match LayerType::try_from(ext) {
+                Ok(ty) => ty,
+                Err(_) => {
+                    debug!("Skipping unrecognised file: {}", name);
+                    continue;
                 }
-            })
-            .collect::<crate::Result<Vec<_>>>()?;
-        let reader = files
-            .iter_mut()
-            .map(|(name, file)| {
-                let reader: &mut dyn Read = file;
-                (name.as_str(), BufReader::new(reader))
-            })
-            .collect::<Vec<_>>();
-        Self::new(reader)
+            };
+
+            let file = match File::open(entry.path()) {
+                Ok(f) => f,
+                Err(e) => {
+                    let err =
+                        error::Error::Io(io::Error::new(e.kind(), format!("'{}': {}", name, e)));
+                    warn!("Failed to open '{}': {}", name, e);
+                    errors.push((name, err));
+                    continue;
+                }
+            };
+
+            debug!("Parsing layer '{}' as {:?}", name, ty);
+            match LayerData::parse(ty, BufReader::new(file)) {
+                Ok((ty, data)) => board.0.push(Layer { ty, name, data }),
+                Err(e) => {
+                    warn!("Failed to parse '{}': {}", name, e);
+                    errors.push((name.clone(), error::Error::ParseError(e, name)));
+                }
+            }
+        }
+
+        Ok(LoadResult { board, errors })
     }
 
     /// Returns references to all layers in insertion order.
@@ -121,8 +155,13 @@ impl Board {
         let layer = layer.into();
         let existing = self.0.iter_mut().find(|e| e.ty == layer.ty);
         if let Some(existing) = existing {
+            debug!(
+                "Merging layer '{}' into existing {:?} layer",
+                layer.name, layer.ty
+            );
             existing.data.merge(&layer.data)
         } else {
+            debug!("Adding new layer '{}' ({:?})", layer.name, layer.ty);
             self.0.push(layer);
         }
     }

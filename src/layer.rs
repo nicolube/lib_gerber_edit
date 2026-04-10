@@ -248,7 +248,7 @@ impl LayerType {
             FileFunction::Profile(Some(Profile::NonPlated)) => LayerType::Dimensions,
             FileFunction::VCut(None) => LayerType::VCut,
             FileFunction::Profile(Some(Profile::Plated)) => LayerType::SidePlating,
-            FileFunction::KeepOut(Position::Top) => LayerType::KeepOut,
+            FileFunction::KeepOut(_) => LayerType::KeepOut,
             FileFunction::Other(_) => LayerType::Info,
             _ => LayerType::UndefinedGerber,
         }

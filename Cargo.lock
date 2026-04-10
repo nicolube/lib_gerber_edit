@@ -217,6 +217,7 @@ dependencies = [
  "derive_more",
  "gerber_parser",
  "lazy_static",
+ "log",
  "serde",
  "thiserror",
 ]

@@ -32,7 +32,11 @@
 //! use std::path::Path;
 //!
 //! // Load every recognised layer from a directory.
-//! let mut board = Board::from_folder(Path::new("gerbers/")).unwrap();
+//! let result = Board::from_folder(Path::new("gerbers/")).unwrap();
+//! for (name, err) in &result.errors {
+//!     eprintln!("Warning: failed to load '{}': {}", name, err);
+//! }
+//! let mut board = result.board;
 //!
 //! // Shift the whole board by (10 mm, 5 mm).
 //! board.transform(&Pos { x: 10.0, y: 5.0 });
@@ -198,7 +202,11 @@ mod tests {
             let out_path = Path::new("output").join(folder);
             fs::create_dir_all(&out_path).unwrap();
             println!("Processing folder: {:?}", in_path);
-            let mut board = Board::from_folder(&in_path).unwrap();
+            let result = Board::from_folder(&in_path).unwrap();
+            for (name, err) in &result.errors {
+                println!("Warning: failed to load '{}': {}", name, err);
+            }
+            let mut board = result.board;
 
             let (min, max) = board.get_corners();
             println!(

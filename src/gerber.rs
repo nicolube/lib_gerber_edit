@@ -13,6 +13,7 @@ use gerber_parser::gerber_types::{
     FunctionCode, GCode, GerberCode, GerberDate, GerberResult, ImageName, MCode, MacroContent,
     Operation, Polarity, QuadrantMode, StandardComment, StepAndRepeat, Unit, ZeroOmission,
 };
+use log::{debug, warn};
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Read, Write};
 
@@ -44,7 +45,7 @@ impl GerberLayerData {
     pub fn new(ty: LayerType, data: GerberDoc) -> Result<Self, ParseError> {
         for command in &data.commands {
             if let Err(err) = command {
-                eprintln!("Error parsing command in file: {}", err);
+                warn!("Error parsing command: {}", err);
             }
         }
 
@@ -106,6 +107,7 @@ impl GerberLayerData {
     where
         R: Read,
     {
+        debug!("Parsing Gerber layer with type {:?}", ty);
         let data = gerber_parser::parse(reader).map_err(|(_, err)| err)?;
         Self::new(ty, data)
     }
@@ -115,6 +117,7 @@ impl GerberLayerData {
     where
         R: Read,
     {
+        debug!("Parsing Gerber layer, detecting type from FileAttribute");
         let data = gerber_parser::parse(reader).map_err(|(_, err)| err)?;
 
         let layer_type =
