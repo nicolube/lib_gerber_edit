@@ -71,11 +71,12 @@ impl GerberLayerData {
             .commands()
             .into_iter()
             .skip_while(|cmd| {
-                !matches!(cmd, Command::FunctionCode(FunctionCode::DCode(_)))
-                    && !matches!(
-                        cmd,
-                        Command::FunctionCode(FunctionCode::GCode(GCode::RegionMode(_)))
-                    )
+                !matches!(
+                    cmd,
+                    Command::FunctionCode(
+                        FunctionCode::DCode(_) | FunctionCode::GCode(GCode::RegionMode(_))
+                    ) | Command::ExtendedCode(ExtendedCode::StepAndRepeat(_))
+                )
             })
             .filter(|cmd| {
                 !matches!(
