@@ -13,7 +13,7 @@ use gerber_parser::gerber_types::{
     FunctionCode, GCode, GerberCode, GerberDate, GerberResult, ImageName, MCode, MacroContent,
     Operation, Polarity, QuadrantMode, StandardComment, StepAndRepeat, Unit, ZeroOmission,
 };
-use log::{debug, warn};
+use log::debug;
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Read, Write};
 
@@ -38,37 +38,37 @@ pub struct GerberLayerData {
     pub macros: HashMap<String, Vec<MacroContent>>,
     /// Aperture definitions keyed by D-code number.
     pub apertures: HashMap<i32, Aperture>,
+    /// Non-fatal errors encountered during parsing, formatted as human-readable strings.
+    pub parse_errors: Vec<String>,
 }
 
 impl GerberLayerData {
     /// Creates a new layer from already loaded gerber doc and its layer type
     pub fn new(ty: LayerType, data: GerberDoc) -> Result<Self, ParseError> {
-        for command in &data.commands {
-            if let Err(err) = command {
-                warn!("Error parsing command: {}", err);
+        let units = data.units;
+        let format_specification = data.format_specification;
+        let apertures = data.apertures;
+
+        let mut parse_errors = Vec::new();
+        let mut all_commands = Vec::new();
+        for result in data.commands {
+            match result {
+                Ok(cmd) => all_commands.push(cmd),
+                Err(err) => parse_errors.push(err.to_string()),
             }
         }
 
-        let file_unit = data.units.unwrap_or(Unit::Millimeters);
-        let mut unit = file_unit;
-
-        let macros = data
-            .commands()
-            .into_iter()
+        let macros = all_commands
+            .iter()
             .filter_map(|cmd| match cmd {
                 Command::ExtendedCode(ExtendedCode::ApertureMacro(mac)) => {
                     Some((mac.name.clone(), mac.content.clone()))
-                }
-                Command::FunctionCode(FunctionCode::GCode(GCode::Unit(cmd))) => {
-                    unit = *cmd;
-                    None
                 }
                 _ => None,
             })
             .collect::<HashMap<_, _>>();
 
-        let commands = data
-            .commands()
+        let commands: Vec<Command> = all_commands
             .into_iter()
             .skip_while(|cmd| {
                 !matches!(
@@ -84,21 +84,20 @@ impl GerberLayerData {
                     Command::FunctionCode(FunctionCode::MCode(MCode::EndOfFile))
                 )
             })
-            .cloned()
             .collect();
 
         let ty = LayerType::from_commands(&commands).unwrap_or(ty);
 
-        let coordinate_format = data
-            .format_specification
+        let coordinate_format = format_specification
             .ok_or(ParseError::FormatMissing(ty.to_string()))?;
         Ok(Self {
-            unit: data.units.unwrap_or(Unit::Millimeters),
+            unit: units.unwrap_or(Unit::Millimeters),
             coordinate_format,
             layer_type: ty,
             commands,
             macros,
-            apertures: data.apertures,
+            apertures,
+            parse_errors,
         }
         .to_unit(&Unit::Millimeters))
     }
@@ -141,6 +140,7 @@ impl GerberLayerData {
             macros: HashMap::new(),
             unit: Unit::Millimeters,
             commands: Vec::new(),
+            parse_errors: Vec::new(),
         }
     }
 
