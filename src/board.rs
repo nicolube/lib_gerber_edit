@@ -43,27 +43,36 @@ impl Board {
     ///
     /// The layer type is inferred from the file extension (e.g. `.gtl` → `Top`).
     /// For `.gbr` files the type is read from the `FileAttribute` embedded in
-    /// the Gerber data. Returns an error if any file's extension is unrecognised
-    /// or its content fails to parse.
-    pub fn new(data: Vec<(&str, BufReader<&mut dyn Read>)>) -> crate::Result<Self> {
-        let mut result = Vec::new();
+    /// the Gerber data. Files with unrecognised extensions or parse failures are
+    /// collected in [`LoadResult::errors`] so the caller can inspect them without
+    /// losing the layers that did load correctly.
+    pub fn new(data: Vec<(&str, BufReader<&mut dyn Read>)>) -> LoadResult {
+        let mut board = Self::empty();
+        let mut errors: Vec<(String, error::Error)> = Vec::new();
         for (name, reader) in data {
             let ty = LayerType::try_from(name.rsplit(".").next().unwrap_or_default());
             match ty {
                 Ok(ty) => {
                     debug!("Parsing layer '{}' as {:?}", name, ty);
-                    let (ty, data) = LayerData::parse(ty, reader)
-                        .map_err(|err| error::Error::ParseError(err, name.to_string()))?;
-                    result.push(Layer {
-                        ty,
-                        name: name.to_string(),
-                        data,
-                    })
+                    match LayerData::parse(ty, reader) {
+                        Ok((ty, data)) => board.0.push(Layer {
+                            ty,
+                            name: name.to_string(),
+                            data,
+                        }),
+                        Err(e) => {
+                            warn!("Failed to parse '{}': {}", name, e);
+                            errors.push((name.to_string(), error::Error::ParseError(e, name.to_string())));
+                        }
+                    }
                 }
-                Err(_) => return Err(error::Error::InvalidType(name.to_string())),
+                Err(_) => {
+                    debug!("Skipping unrecognised file: {}", name);
+                    errors.push((name.to_string(), error::Error::InvalidType(name.to_string())));
+                }
             }
         }
-        Ok(Self(result))
+        LoadResult { board, errors }
     }
 
     /// Creates a board with no layers.
