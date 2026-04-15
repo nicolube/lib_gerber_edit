@@ -88,8 +88,8 @@ impl GerberLayerData {
 
         let ty = LayerType::from_commands(&commands).unwrap_or(ty);
 
-        let coordinate_format = format_specification
-            .ok_or(ParseError::FormatMissing(ty.to_string()))?;
+        let coordinate_format =
+            format_specification.ok_or(ParseError::FormatMissing(ty.to_string()))?;
         Ok(Self {
             unit: units.unwrap_or(Unit::Millimeters),
             coordinate_format,
@@ -121,7 +121,7 @@ impl GerberLayerData {
         let data = gerber_parser::parse(reader).map_err(|(_, err)| err)?;
 
         let layer_type =
-            LayerType::from_commands(data.commands()).ok_or(ParseError::TypeNotFound)?;
+            LayerType::from_commands(data.commands()).unwrap_or(LayerType::UndefinedGerber);
 
         Self::new(layer_type, data)
     }

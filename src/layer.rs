@@ -8,7 +8,6 @@ use gerber_parser::gerber_types::{
 };
 use std::fmt::{Display, Formatter};
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::result;
 
 #[cfg(feature = "serde")]
 use ::serde::{Deserialize, Serialize};
@@ -149,7 +148,7 @@ pub enum LayerType {
 impl TryFrom<&str> for LayerType {
     type Error = String;
 
-    fn try_from(value: &str) -> result::Result<Self, Self::Error> {
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value.to_uppercase().as_str() {
             "GTL" => Ok(LayerType::Top),
             "GBL" => Ok(LayerType::Bottom),
@@ -214,40 +213,40 @@ impl LayerType {
             FileFunction::Copper {
                 layer: _,
                 pos: ExtendedPosition::Top,
-                copper_type: None,
+                copper_type: _,
             } => LayerType::Top,
             FileFunction::Copper {
                 layer: _,
                 pos: ExtendedPosition::Bottom,
-                copper_type: None,
+                copper_type: _,
             } => LayerType::Bottom,
             FileFunction::Copper {
                 layer,
                 pos: ExtendedPosition::Inner,
-                copper_type: None,
+                copper_type: _,
             } => LayerType::Inner(*layer),
             FileFunction::Paste(Position::Top) => LayerType::PasteTop,
             FileFunction::Paste(Position::Bottom) => LayerType::PasteBottom,
             FileFunction::SolderMask {
                 pos: Position::Top,
-                index: None,
+                index: _,
             } => LayerType::MaskTop,
             FileFunction::SolderMask {
                 pos: Position::Bottom,
-                index: None,
+                index: _,
             } => LayerType::MaskBottom,
             FileFunction::Legend {
                 pos: Position::Top,
-                index: None,
+                index: _,
             } => LayerType::SilkScreenTop,
             FileFunction::Legend {
                 pos: Position::Bottom,
-                index: None,
+                index: _,
             } => LayerType::SilkScreenBottom,
             FileFunction::DrillMap => LayerType::Drill,
-            FileFunction::Profile(Some(Profile::NonPlated)) => LayerType::Dimensions,
-            FileFunction::VCut(None) => LayerType::VCut,
             FileFunction::Profile(Some(Profile::Plated)) => LayerType::SidePlating,
+            FileFunction::Profile(_) => LayerType::Dimensions,
+            FileFunction::VCut(_) => LayerType::VCut,
             FileFunction::KeepOut(_) => LayerType::KeepOut,
             FileFunction::Other(_) => LayerType::Info,
             _ => LayerType::UndefinedGerber,

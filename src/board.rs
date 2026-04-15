@@ -46,11 +46,11 @@ impl Board {
     /// the Gerber data. Files with unrecognised extensions or parse failures are
     /// collected in [`LoadResult::errors`] so the caller can inspect them without
     /// losing the layers that did load correctly.
-    pub fn new(data: Vec<(&str, BufReader<&mut dyn Read>)>) -> LoadResult {
+    pub fn load(data: Vec<(&str, BufReader<&mut dyn Read>)>) -> LoadResult {
         let mut board = Self::empty();
         let mut errors: Vec<(String, error::Error)> = Vec::new();
         for (name, reader) in data {
-            let ty = LayerType::try_from(name.rsplit(".").next().unwrap_or_default());
+            let ty = LayerType::try_from(name.rsplit('.').next().unwrap_or_default());
             match ty {
                 Ok(ty) => {
                     debug!("Parsing layer '{}' as {:?}", name, ty);
@@ -62,13 +62,19 @@ impl Board {
                         }),
                         Err(e) => {
                             warn!("Failed to parse '{}': {}", name, e);
-                            errors.push((name.to_string(), error::Error::ParseError(e, name.to_string())));
+                            errors.push((
+                                name.to_string(),
+                                error::Error::ParseError(e, name.to_string()),
+                            ));
                         }
                     }
                 }
                 Err(_) => {
                     debug!("Skipping unrecognised file: {}", name);
-                    errors.push((name.to_string(), error::Error::InvalidType(name.to_string())));
+                    errors.push((
+                        name.to_string(),
+                        error::Error::InvalidType(name.to_string()),
+                    ));
                 }
             }
         }
@@ -127,8 +133,10 @@ impl Board {
             .collect();
 
         #[cfg(feature = "parallel")]
-        let results: Vec<Result<Layer, (String, error::Error)>> =
-            candidates.into_par_iter().map(Self::parse_candidate).collect();
+        let results: Vec<Result<Layer, (String, error::Error)>> = candidates
+            .into_par_iter()
+            .map(Self::parse_candidate)
+            .collect();
 
         #[cfg(not(feature = "parallel"))]
         let results: Vec<Result<Layer, (String, error::Error)>> =
@@ -166,13 +174,13 @@ impl Board {
     }
 
     /// Returns references to all layers in insertion order.
-    pub fn layers(&self) -> Vec<&Layer> {
-        self.0.iter().collect()
+    pub fn layers(&self) -> &[Layer] {
+        &self.0
     }
 
     /// Returns mutable references to all layers in insertion order.
-    pub fn layers_mut(&mut self) -> Vec<&mut Layer> {
-        self.0.iter_mut().collect()
+    pub fn layers_mut(&mut self) -> &mut [Layer] {
+        &mut self.0
     }
 
     /// Inserts a layer into the board, or merges it into the existing layer of
@@ -193,6 +201,27 @@ impl Board {
             debug!("Adding new layer '{}' ({:?})", layer.name, layer.ty);
             self.0.push(layer);
         }
+    }
+
+    /// Returns `true` if any layer has type [`LayerType::UndefinedGerber`].
+    pub fn has_undefined(&self) -> bool {
+        self.0.iter().any(|l| l.ty == LayerType::UndefinedGerber)
+    }
+
+    /// Returns all layers with type [`LayerType::UndefinedGerber`].
+    pub fn get_undefined(&self) -> Vec<&Layer> {
+        self.0
+            .iter()
+            .filter(|l| l.ty == LayerType::UndefinedGerber)
+            .collect()
+    }
+
+    /// Returns mutable references to all layers with type [`LayerType::UndefinedGerber`].
+    pub fn get_undefined_mut(&mut self) -> Vec<&mut Layer> {
+        self.0
+            .iter_mut()
+            .filter(|l| l.ty == LayerType::UndefinedGerber)
+            .collect()
     }
 
     /// Returns the layer with the given type, or `None` if not present.
@@ -253,7 +282,6 @@ impl LayerCorners for Board {
             y: f64::MIN,
         };
         for layer in self.0.iter() {
-            // Those layers have no relevance for board size calculations
             if [LayerType::KeepOut, LayerType::Info, LayerType::SidePlating].contains(&layer.ty) {
                 continue;
             }

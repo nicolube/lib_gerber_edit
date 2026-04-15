@@ -91,7 +91,7 @@ All traits are implemented for `Board`, `GerberLayerData`, `ExcellonLayerData`, 
 
 ```rust
 Board::from_folder(path)          // load all recognised layers from a directory
-Board::new(vec![("name.gbr", reader), ...])  // load from in-memory readers
+Board::load(vec![("name.gbr", reader), ...]) // load from in-memory readers
 board.add_layer(layer)            // merge if type exists, insert otherwise
 board.get_layer(&LayerType::Top)  // look up a layer by type
 board.write_to_folder(path)       // write all layers back to disk

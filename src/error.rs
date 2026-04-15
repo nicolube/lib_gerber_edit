@@ -18,6 +18,4 @@ pub enum ParseError {
     ExcellonParseError(io::Error),
     #[error("Missing coordinate format specification in layer '{0}'")]
     FormatMissing(String),
-    #[error("Cannot determine layer type from file attributes")]
-    TypeNotFound,
 }
