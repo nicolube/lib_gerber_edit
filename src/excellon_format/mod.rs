@@ -7,7 +7,12 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::num::{ParseFloatError, ParseIntError};
-use std::str::FromStr;
+use winnow::ModalResult;
+use winnow::Parser;
+use winnow::ascii::{dec_uint, digit1, float};
+use winnow::combinator::{alt, opt, preceded};
+use winnow::error::ContextError;
+use winnow::token::take;
 
 /// A parsed Excellon drill file, split into header and body sections.
 ///
@@ -307,7 +312,7 @@ impl Display for Command {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnitDefinition {
-    unit: Unit,
+    pub unit: Unit,
     ty: ZeroSuppression,
     leading: u8,
     trailing: u8,
@@ -400,41 +405,6 @@ pub enum GeometricCode {
     InputMode(InputMode), // G90, G91
 }
 
-impl FromStr for GeometricCode {
-    type Err = ExcellonError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.chars().nth(0) != Some('G') {
-            return Err(ExcellonError::InvalidCmd(s.to_string()));
-        }
-        let id = s[1..3]
-            .parse::<u8>()
-            .map_err(|e| ExcellonError::IntParse(e, s.to_string()))?;
-        match id {
-            // TODO: Deserialize Coords
-            0 => Ok(GeometricCode::Mode(Route(0.0, 0.0))),
-            1 => Ok(GeometricCode::Mode(Mode::Linear)),
-            2 => Ok(GeometricCode::Mode(Mode::CircularCW)),
-            3 => Ok(GeometricCode::Mode(Mode::CircularCWW)),
-            4 => {
-                if s.chars().nth(3) != Some('X') {
-                    Err(ExcellonError::Custom(
-                        "Does not start with `G04X`".to_string(),
-                    ))?;
-                }
-                let duration = s[4..]
-                    .parse::<u16>()
-                    .map_err(|e| ExcellonError::IntParse(e, s[4..].to_string()))?;
-                Ok(GeometricCode::VariableDwell(duration))
-            }
-            5 => Ok(GeometricCode::Mode(Mode::DrillMode)),
-            7 => Ok(GeometricCode::OverrideFeed),
-            90 => Ok(GeometricCode::InputMode(InputMode::Absolute)),
-            91 => Ok(GeometricCode::InputMode(InputMode::Incremental)),
-            _ => Err(ExcellonError::InvalidGeometricCode(id)),
-        }
-    }
-}
 
 impl Display for GeometricCode {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -509,138 +479,163 @@ impl Display for MachineCode {
 
 enum LineResult {
     Command(Command),
-    RawCoordinate(Option<String>, Option<String>),
+    RawCoordinate(Option<f64>, Option<f64>),
 }
-impl FromStr for LineResult {
-    type Err = ExcellonError;
 
-    fn from_str(line: &str) -> Result<Self, Self::Err> {
-        if let Some(stripped) = line.strip_prefix(';') {
-            // Comment line
-            Ok(LineResult::Command(Command::Comment(stripped.to_string())))
-        } else if let Some(version) = line.strip_prefix("FMAT,") {
-            let version = version.parse().map_err(|_| ExcellonError::InvalidVersion)?;
-            Ok(LineResult::Command(Command::FormatCode(version)))
-        } else if let Some(options) = line.strip_prefix("ICI") {
-            if options.is_empty() || options == ",ON" {
-                Ok(LineResult::Command(Command::Incremental(true)))
-            } else if options == ",OFF" {
-                Ok(LineResult::Command(Command::Incremental(false)))
-            } else {
-                Err(Self::Err::InvalidCicOption(options.to_owned()))
-            }
-        } else if line == "%" {
-            Ok(LineResult::Command(Command::Machine(
-                MachineCode::RewindStop,
-            )))
-        } else if line.starts_with("METRIC") || line.starts_with("INCH") {
-            // Unit definition
-            let parts: Vec<&str> = line.split(',').collect();
-            let unit = if line.is_empty() || parts[0] == "INCH" {
-                Unit::Inches
-            } else if parts[0] == "METRIC" {
-                Unit::Millimeters
-            } else {
-                return Err(ExcellonError::InvalidUnitDefinition);
-            };
+fn run<'i, T, P>(input: &'i str, mut parser: P) -> Result<T, ()>
+where
+    P: Parser<&'i str, T, ContextError>,
+{
+    parser.parse(input).map_err(|_| ())
+}
 
-            let zero_suppression = if parts.len() >= 2 {
-                if parts[1] == "TZ" {
-                    ZeroSuppression::Trailing
-                } else if parts[1] == "LZ" {
-                    ZeroSuppression::Leading
-                } else {
-                    return Err(ExcellonError::InvalidUnitDefinition);
-                }
-            } else {
-                UnitDefinition::default().ty
-            };
-            let (leading, trailing) = if parts.len() >= 3
-                && let Some((leading, trailing)) = parts[2].split_once(".")
-            {
-                (leading.len() as u8, trailing.len() as u8)
-            } else {
-                let default = UnitDefinition::default();
-                (default.leading, default.trailing)
-            };
-            Ok(LineResult::Command(Command::UnitDefinition(
-                UnitDefinition {
-                    unit,
-                    ty: zero_suppression,
-                    trailing,
-                    leading,
-                },
-            )))
-        } else if let Some(code) = line.strip_prefix('M') {
-            // Machine code
-            let code = code.parse::<u8>().unwrap_or(0);
-            let code = match code {
-                30 => MachineCode::EndOfProgram,
-                48 => MachineCode::HeaderStart,
-                71 => MachineCode::Scale(Unit::Millimeters),
-                72 => MachineCode::Scale(Unit::Inches),
-                95 => MachineCode::HeaderEnd,
-                code => return Err(ExcellonError::InvalidMachineCode(code)),
-            };
-            Ok(LineResult::Command(Command::Machine(code)))
-        } else if line.starts_with('T') {
-            // T<tool_number> or T<tool_number>C<diameter>
-            let parts: Vec<&str> = line.trim().split('C').collect();
+fn parse_fmat(tail: &str) -> Result<LineResult, ExcellonError> {
+    run(tail, dec_uint::<_, u8, _>)
+        .map(|v| LineResult::Command(Command::FormatCode(v)))
+        .map_err(|_| ExcellonError::InvalidVersion)
+}
 
-            if parts.is_empty() || parts.len() > 2 {
-                return Err(ExcellonError::InvalidToolDefinition(line.to_string()));
-            }
-            let tool_number = parts[0][1..]
-                .parse::<u32>()
-                .map_err(|err| ExcellonError::IntParse(err, parts[0][1..].to_string()))?;
-
-            if parts.len() == 2 {
-                // Tool definition with diameter
-                let diameter = parts[1]
-                    .parse::<f64>()
-                    .map_err(|err| ExcellonError::FloatParse(err, parts[1][1..].to_string()))?;
-                Ok(LineResult::Command(Command::ToolDefinition(
-                    ToolDefinition {
-                        tool_number,
-                        diameter,
-                    },
-                )))
-            } else if parts.len() == 1 {
-                // Tool selection
-                Ok(LineResult::Command(Command::Tool(tool_number)))
-            } else {
-                Err(ExcellonError::InvalidCmd(line.to_string()))
-            }
-        } else if line.starts_with('G') {
-            Ok(LineResult::Command(Command::Geometric(
-                GeometricCode::from_str(line)?,
-            )))
-        } else if line.starts_with("X") || line.starts_with("Y") {
-            let mut x = None;
-            let mut y = None;
-            let mut pos = 0;
-            for _ in 0..2 {
-                let num = line[pos + 1..]
-                    .chars()
-                    .take_while(|x| x.is_numeric() || x == &'-')
-                    .collect::<String>();
-                let len = num.len() + 1;
-                match line.chars().nth(pos) {
-                    Some('X') => x = Some(num),
-                    Some('Y') => y = Some(num),
-                    _ => return Err(ExcellonError::InvalidCoordinate(line.to_string())),
-                }
-                pos += len;
-            }
-            if x.is_some() || y.is_some() {
-                Ok(LineResult::RawCoordinate(x, y))
-            } else {
-                Err(ExcellonError::InvalidCoordinate(line.to_string()))
-            }
-        } else {
-            Err(ExcellonError::InvalidCmd(line.to_string()))
-        }
+fn parse_ici(tail: &str) -> Result<LineResult, ExcellonError> {
+    let opts = opt(preceded(',', alt(("ON", "OFF"))));
+    match run(tail, opts) {
+        Ok(None) | Ok(Some("ON")) => Ok(LineResult::Command(Command::Incremental(true))),
+        Ok(Some("OFF")) => Ok(LineResult::Command(Command::Incremental(false))),
+        _ => Err(ExcellonError::InvalidCicOption(tail.to_string())),
     }
+}
+
+fn parse_unit(line: &str) -> Result<LineResult, ExcellonError> {
+    let unit = alt((
+        "METRIC".value(Unit::Millimeters),
+        "INCH".value(Unit::Inches),
+    ));
+    let ty = opt(preceded(
+        ',',
+        alt((
+            "TZ".value(ZeroSuppression::Trailing),
+            "LZ".value(ZeroSuppression::Leading),
+        )),
+    ));
+    let digits = opt(preceded(
+        ',',
+        (digit1, '.', digit1)
+            .map(|(l, _, t): (&str, _, &str)| (l.len() as u8, t.len() as u8)),
+    ));
+    let (unit, ty_opt, digits_opt) =
+        run(line, (unit, ty, digits)).map_err(|_| ExcellonError::InvalidUnitDefinition)?;
+    let default = UnitDefinition::default();
+    let (leading, trailing) = digits_opt.unwrap_or((default.leading, default.trailing));
+    Ok(LineResult::Command(Command::UnitDefinition(
+        UnitDefinition {
+            unit,
+            ty: ty_opt.unwrap_or(default.ty),
+            leading,
+            trailing,
+        },
+    )))
+}
+
+fn parse_machine(tail: &str, line: &str) -> Result<LineResult, ExcellonError> {
+    let code = run(tail, dec_uint::<_, u8, _>)
+        .map_err(|_| ExcellonError::InvalidCmd(line.to_string()))?;
+    let mc = match code {
+        30 => MachineCode::EndOfProgram,
+        48 => MachineCode::HeaderStart,
+        71 => MachineCode::Scale(Unit::Millimeters),
+        72 => MachineCode::Scale(Unit::Inches),
+        95 => MachineCode::HeaderEnd,
+        c => return Err(ExcellonError::InvalidMachineCode(c)),
+    };
+    Ok(LineResult::Command(Command::Machine(mc)))
+}
+
+fn parse_tool(tail: &str, line: &str) -> Result<LineResult, ExcellonError> {
+    let parser = (
+        dec_uint::<_, u32, _>,
+        opt(preceded('C', float::<_, f64, _>)),
+    );
+    match run(tail, parser) {
+        Ok((tool_number, Some(diameter))) => Ok(LineResult::Command(Command::ToolDefinition(
+            ToolDefinition {
+                tool_number,
+                diameter,
+            },
+        ))),
+        Ok((tool_number, None)) => Ok(LineResult::Command(Command::Tool(tool_number))),
+        Err(_) => Err(ExcellonError::InvalidToolDefinition(line.to_string())),
+    }
+}
+
+fn parse_geometric(tail: &str, line: &str) -> Result<LineResult, ExcellonError> {
+    let id_p = take(2usize).and_then(dec_uint::<_, u8, _>);
+    let dwell_p = opt(preceded('X', dec_uint::<_, u16, _>));
+    let (id, dwell) =
+        run(tail, (id_p, dwell_p)).map_err(|_| ExcellonError::InvalidCmd(line.to_string()))?;
+    let code = match id {
+        // TODO: Deserialize Coords
+        0 => GeometricCode::Mode(Route(0.0, 0.0)),
+        1 => GeometricCode::Mode(Mode::Linear),
+        2 => GeometricCode::Mode(Mode::CircularCW),
+        3 => GeometricCode::Mode(Mode::CircularCWW),
+        4 => GeometricCode::VariableDwell(
+            dwell.ok_or_else(|| ExcellonError::Custom("Does not start with `G04X`".to_string()))?,
+        ),
+        5 => GeometricCode::Mode(Mode::DrillMode),
+        7 => GeometricCode::OverrideFeed,
+        90 => GeometricCode::InputMode(InputMode::Absolute),
+        91 => GeometricCode::InputMode(InputMode::Incremental),
+        c => return Err(ExcellonError::InvalidGeometricCode(c)),
+    };
+    Ok(LineResult::Command(Command::Geometric(code)))
+}
+
+fn parse_coord(line: &str, fmt: &UnitDefinition) -> Result<LineResult, ExcellonError> {
+    fn inner<'i>(
+        input: &mut &'i str,
+    ) -> ModalResult<(Option<&'i str>, Option<&'i str>)> {
+        let val = |i: &mut &'i str| (opt('-'), digit1).take().parse_next(i);
+        (opt(preceded('X', val)), opt(preceded('Y', val))).parse_next(input)
+    }
+    match inner.parse(line) {
+        Ok((x, y)) if x.is_some() || y.is_some() => Ok(LineResult::RawCoordinate(
+            x.and_then(|t| fmt.parse_num(t).ok()),
+            y.and_then(|t| fmt.parse_num(t).ok()),
+        )),
+        _ => Err(ExcellonError::InvalidCoordinate(line.to_string())),
+    }
+}
+
+fn parse_line(line: &str, fmt: &UnitDefinition) -> Result<LineResult, ExcellonError> {
+    if let Some(stripped) = line.strip_prefix(';') {
+        return Ok(LineResult::Command(Command::Comment(stripped.to_string())));
+    }
+    if line == "%" {
+        return Ok(LineResult::Command(Command::Machine(
+            MachineCode::RewindStop,
+        )));
+    }
+    if let Some(tail) = line.strip_prefix("FMAT,") {
+        return parse_fmat(tail);
+    }
+    if let Some(tail) = line.strip_prefix("ICI") {
+        return parse_ici(tail);
+    }
+    if line.starts_with("METRIC") || line.starts_with("INCH") {
+        return parse_unit(line);
+    }
+    if let Some(tail) = line.strip_prefix('M') {
+        return parse_machine(tail, line);
+    }
+    if let Some(tail) = line.strip_prefix('T') {
+        return parse_tool(tail, line);
+    }
+    if let Some(tail) = line.strip_prefix('G') {
+        return parse_geometric(tail, line);
+    }
+    if line.starts_with('X') || line.starts_with('Y') {
+        return parse_coord(line, fmt);
+    }
+    Err(ExcellonError::InvalidCmd(line.to_string()))
 }
 
 pub fn parse_excellon<T>(mut reader: BufReader<T>) -> std::io::Result<ExcellonLayerData>
@@ -655,42 +650,37 @@ where
     let mut line_number = 0;
     let mut tools = HashMap::new();
     while reader.read_line(&mut buf)? > 0 {
-        let line = buf.clone();
-        let result = LineResult::from_str(line.trim());
-        commands.push(
-            match result {
-                Ok(LineResult::Command(cmd)) => {
-                    match &cmd {
-                        Command::UnitDefinition(unit) => format = unit.clone(),
-                        Command::Machine(MachineCode::Scale(u)) => format.unit = *u,
-                        Command::ToolDefinition(td) => {
-                            tools.insert(td.tool_number, td.diameter);
-                        }
-                        Command::Tool(id) => {
-                            if !tools.contains_key(id) {
-                                return Err(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    ExcellonError::InvalidToolNumber(*id),
-                                ));
-                            }
-                        }
-                        _ => {}
+        let trimmed = buf.trim();
+        let cmd_result = match parse_line(trimmed, &format) {
+            Ok(LineResult::Command(cmd)) => {
+                match &cmd {
+                    Command::UnitDefinition(unit) => format = unit.clone(),
+                    Command::Machine(MachineCode::Scale(u)) => format.unit = *u,
+                    Command::ToolDefinition(td) => {
+                        tools.insert(td.tool_number, td.diameter);
                     }
-                    Ok(cmd)
+                    Command::Tool(id) => {
+                        if !tools.contains_key(id) {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                ExcellonError::InvalidToolNumber(*id),
+                            ));
+                        }
+                    }
+                    _ => {}
                 }
-                Ok(LineResult::RawCoordinate(x, y)) => Ok(Command::Coordinate(
-                    x.and_then(|t| format.parse_num(t.as_str()).ok()),
-                    y.and_then(|t| format.parse_num(t.as_str()).ok()),
-                    format.clone(),
-                )),
-                Err(err) => Err(err),
+                Ok(cmd)
             }
-            .map_err(|e| ExcellonParseFormat {
-                source: e,
-                line: line_number,
-                content: line.clone(),
-            }),
-        );
+            Ok(LineResult::RawCoordinate(x, y)) => {
+                Ok(Command::Coordinate(x, y, format.clone()))
+            }
+            Err(err) => Err(err),
+        };
+        commands.push(cmd_result.map_err(|e| ExcellonParseFormat {
+            source: e,
+            line: line_number,
+            content: trimmed.to_string(),
+        }));
         buf.clear();
         line_number += 1;
     }
@@ -721,6 +711,12 @@ where
         unit: format,
         tools,
     })
+}
+
+impl From<ExcellonLayerData> for LayerData {
+    fn from(value: ExcellonLayerData) -> Self {
+        LayerData::Excellon(value)
+    }
 }
 
 #[cfg(test)]
@@ -776,11 +772,5 @@ mod tests {
         assert_eq!(serialized, "-12340");
         assert_eq!(fmt.parse_num(&serialized)?, num);
         Ok(())
-    }
-}
-
-impl From<ExcellonLayerData> for LayerData {
-    fn from(value: ExcellonLayerData) -> Self {
-        LayerData::Excellon(value)
     }
 }
