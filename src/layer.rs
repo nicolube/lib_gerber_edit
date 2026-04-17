@@ -6,8 +6,9 @@ use gerber_parser::gerber_types::{
     Command, CommentContent, ExtendedCode, ExtendedPosition, FileAttribute, FileFunction,
     FunctionCode, GCode, GerberResult, Position, Profile, StandardComment,
 };
+use log::debug;
 use std::fmt::{Display, Formatter};
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 
 #[cfg(feature = "serde")]
 use ::serde::{Deserialize, Serialize};
@@ -29,18 +30,31 @@ pub struct Layer {
 impl LayerData {
     pub fn parse<T>(
         ty: LayerType,
-        reader: BufReader<T>,
+        mut reader: BufReader<T>,
     ) -> Result<(LayerType, LayerData), ParseError>
     where
         T: Read,
     {
         Ok(match ty {
-            LayerType::Drill => (
-                ty,
-                LayerData::Excellon(
-                    parse_excellon(reader).map_err(ParseError::ExcellonParseError)?,
-                ),
-            ),
+            LayerType::Drill => {
+                let mut buf = Vec::new();
+                reader
+                    .read_to_end(&mut buf)
+                    .map_err(ParseError::ExcellonParseError)?;
+                match parse_excellon(BufReader::new(Cursor::new(&buf))) {
+                    Ok(data) => (ty, LayerData::Excellon(data)),
+                    Err(excellon_err) => {
+                        debug!("Excellon parse failed, trying Gerber: {}", excellon_err);
+                        (
+                            ty,
+                            LayerData::Gerber(GerberLayerData::from_type(
+                                ty,
+                                BufReader::new(Cursor::new(buf)),
+                            )?),
+                        )
+                    }
+                }
+            }
             LayerType::UndefinedGerber => {
                 let layer = GerberLayerData::from_commands(reader)?;
                 (layer.layer_type, LayerData::Gerber(layer))
