@@ -245,6 +245,7 @@ impl LayerType {
             } => LayerType::SilkScreenBottom,
             FileFunction::DrillMap => LayerType::Drill,
             FileFunction::Profile(Some(Profile::Plated)) => LayerType::SidePlating,
+            FileFunction::Profile(Some(Profile::NonPlated)) => LayerType::Milling,
             FileFunction::Profile(_) => LayerType::Dimensions,
             FileFunction::VCut(_) => LayerType::VCut,
             FileFunction::KeepOut(_) => LayerType::KeepOut,
