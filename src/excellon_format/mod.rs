@@ -239,6 +239,8 @@ pub enum ExcellonError {
     /// Referenced tool number has no matching `T<n>C<diam>` definition.
     #[display("Invalid tool number: {}", _0)]
     InvalidToolNumber(#[error(not(source))] u32),
+    #[display("Missing header-end marker (M95/%)")]
+    MissingHeaderEnd,
     #[display("Failed to parse floating number: {}", _1)]
     FloatParse(#[error(source)] ParseFloatError, String),
     #[display("Failed to parse number: {}", _1)]
@@ -695,7 +697,14 @@ where
         })
         .cloned()
         .collect::<Vec<_>>();
-    header.push(commands[header.len()].clone());
+    if let Some(cmd) = commands.get(header.len()) {
+        header.push(cmd.clone());
+    } else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            ExcellonError::MissingHeaderEnd,
+        ));
+    }
     let commands = commands.into_iter().skip(header.len()).collect::<Vec<_>>();
     let format = header
         .iter()
