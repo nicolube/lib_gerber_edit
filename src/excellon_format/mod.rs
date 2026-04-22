@@ -241,6 +241,12 @@ pub enum ExcellonError {
     InvalidToolNumber(#[error(not(source))] u32),
     #[display("Missing header-end marker (M95/%)")]
     MissingHeaderEnd,
+    #[display("Missing header-start marker (M48)")]
+    MissingHeaderStart,
+    #[display("Missing end-of-program marker (M30)")]
+    MissingEndOfProgram,
+    #[display("Coordinate used before unit declaration")]
+    CoordinateBeforeUnit,
     #[display("Failed to parse floating number: {}", _1)]
     FloatParse(#[error(source)] ParseFloatError, String),
     #[display("Failed to parse number: {}", _1)]
@@ -249,6 +255,12 @@ pub enum ExcellonError {
     InvalidVersion,
     #[display("{}", _0)]
     Custom(#[error(not(source))] String),
+}
+
+impl From<ExcellonError> for std::io::Error {
+    fn from(e: ExcellonError) -> Self {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+    }
 }
 
 /// A parse error annotated with its source line number and raw text.
@@ -318,15 +330,29 @@ pub struct UnitDefinition {
     ty: ZeroSuppression,
     leading: u8,
     trailing: u8,
+    /// Decimal-point coordinate mode (XNC): coords written as floats, no zero suppression.
+    decimal: bool,
 }
 
 impl Default for UnitDefinition {
     fn default() -> Self {
+        Self::default_for(Unit::Inches)
+    }
+}
+
+impl UnitDefinition {
+    /// Per-unit defaults per Excellon 2 / IPC-NC-349 (INCH 2.4 LZ, METRIC 3.3 LZ).
+    fn default_for(unit: Unit) -> Self {
+        let (leading, trailing) = match unit {
+            Unit::Inches => (2, 4),
+            Unit::Millimeters => (3, 3),
+        };
         Self {
-            unit: Unit::Inches,
-            ty: ZeroSuppression::Trailing,
-            leading: 3,
-            trailing: 3,
+            unit,
+            ty: ZeroSuppression::Leading,
+            leading,
+            trailing,
+            decimal: false,
         }
     }
 }
@@ -336,20 +362,27 @@ impl Display for UnitDefinition {
             Unit::Inches => "INCH",
             Unit::Millimeters => "METRIC",
         };
-        write!(
-            f,
-            "{},{},{}.{}",
-            ty,
-            self.ty,
-            "0".repeat(self.leading as usize),
-            "0".repeat(self.trailing as usize)
-        )
+        if self.decimal {
+            write!(f, "{}", ty)
+        } else {
+            write!(
+                f,
+                "{},{},{}.{}",
+                ty,
+                self.ty,
+                "0".repeat(self.leading as usize),
+                "0".repeat(self.trailing as usize)
+            )
+        }
     }
 }
 
 impl UnitDefinition {
     fn parse_num(&self, raw: &str) -> Result<f64, ParseFloatError> {
-        let neg = raw.chars().nth(0) == Some('-');
+        if self.decimal || raw.contains('.') {
+            return raw.parse::<f64>();
+        }
+        let neg = raw.starts_with('-');
         let len = (self.trailing + self.leading) as usize;
         let raw = if self.ty == ZeroSuppression::Leading {
             let (raw, prefix) = if neg { (&raw[1..], "-") } else { (raw, "") };
@@ -361,14 +394,14 @@ impl UnitDefinition {
         } else {
             raw.to_string()
         };
-        if neg && raw.len() - 1 > len && raw.len() > len {
-            panic!("too many bytes");
-        }
         raw.parse::<f64>()
             .map(|t| t / 10f64.powi(self.trailing as i32))
     }
 
     fn serialize(&self, num: f64) -> String {
+        if self.decimal {
+            return format!("{}", num);
+        }
         if num == 0.0 {
             return "0".to_string();
         }
@@ -498,10 +531,10 @@ fn parse_fmat(tail: &str) -> Result<LineResult, ExcellonError> {
 }
 
 fn parse_ici(tail: &str) -> Result<LineResult, ExcellonError> {
-    let opts = opt(preceded(',', alt(("ON", "OFF"))));
+    let opts = preceded(',', alt(("ON", "OFF")));
     match run(tail, opts) {
-        Ok(None) | Ok(Some("ON")) => Ok(LineResult::Command(Command::Incremental(true))),
-        Ok(Some("OFF")) => Ok(LineResult::Command(Command::Incremental(false))),
+        Ok("ON") => Ok(LineResult::Command(Command::Incremental(true))),
+        Ok("OFF") => Ok(LineResult::Command(Command::Incremental(false))),
         _ => Err(ExcellonError::InvalidCicOption(tail.to_string())),
     }
 }
@@ -525,16 +558,17 @@ fn parse_unit(line: &str) -> Result<LineResult, ExcellonError> {
     ));
     let (unit, ty_opt, digits_opt) =
         run(line, (unit, ty, digits)).map_err(|_| ExcellonError::InvalidUnitDefinition)?;
-    let default = UnitDefinition::default();
+    // XNC form: `INCH` / `METRIC` alone → decimal coordinates, no zero suppression.
+    let decimal = ty_opt.is_none() && digits_opt.is_none();
+    let default = UnitDefinition::default_for(unit);
     let (leading, trailing) = digits_opt.unwrap_or((default.leading, default.trailing));
-    Ok(LineResult::Command(Command::UnitDefinition(
-        UnitDefinition {
-            unit,
-            ty: ty_opt.unwrap_or(default.ty),
-            leading,
-            trailing,
-        },
-    )))
+    Ok(LineResult::Command(Command::UnitDefinition(UnitDefinition {
+        ty: ty_opt.unwrap_or(default.ty),
+        leading,
+        trailing,
+        decimal,
+        ..default
+    })))
 }
 
 fn parse_machine(tail: &str, line: &str) -> Result<LineResult, ExcellonError> {
@@ -595,7 +629,11 @@ fn parse_coord(line: &str, fmt: &UnitDefinition) -> Result<LineResult, ExcellonE
     fn inner<'i>(
         input: &mut &'i str,
     ) -> ModalResult<(Option<&'i str>, Option<&'i str>)> {
-        let val = |i: &mut &'i str| (opt('-'), digit1).take().parse_next(i);
+        let val = |i: &mut &'i str| {
+            (opt('-'), digit1, opt(('.', digit1)))
+                .take()
+                .parse_next(i)
+        };
         (opt(preceded('X', val)), opt(preceded('Y', val))).parse_next(input)
     }
     match inner.parse(line) {
@@ -647,31 +685,40 @@ where
     let mut commands = Vec::new();
 
     let mut format = UnitDefinition::default();
+    let mut unit_set = false;
 
     let mut buf = String::new();
     let mut line_number = 0;
     let mut tools = HashMap::new();
     while reader.read_line(&mut buf)? > 0 {
         let trimmed = buf.trim();
+        if trimmed.is_empty() {
+            buf.clear();
+            line_number += 1;
+            continue;
+        }
         let cmd_result = match parse_line(trimmed, &format) {
             Ok(LineResult::Command(cmd)) => {
                 match &cmd {
-                    Command::UnitDefinition(unit) => format = unit.clone(),
+                    Command::UnitDefinition(unit) => {
+                        format = unit.clone();
+                        unit_set = true;
+                    }
                     Command::Machine(MachineCode::Scale(u)) => format.unit = *u,
                     Command::ToolDefinition(td) => {
                         tools.insert(td.tool_number, td.diameter);
                     }
                     Command::Tool(id) => {
                         if !tools.contains_key(id) {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                ExcellonError::InvalidToolNumber(*id),
-                            ));
+                            return Err(ExcellonError::InvalidToolNumber(*id).into());
                         }
                     }
                     _ => {}
                 }
                 Ok(cmd)
+            }
+            Ok(LineResult::RawCoordinate(_, _)) if !unit_set => {
+                Err(ExcellonError::CoordinateBeforeUnit)
             }
             Ok(LineResult::RawCoordinate(x, y)) => {
                 Ok(Command::Coordinate(x, y, format.clone()))
@@ -685,6 +732,21 @@ where
         }));
         buf.clear();
         line_number += 1;
+    }
+
+    let mut first_sig = None;
+    let mut last_sig = None;
+    for cmd in &commands {
+        if !matches!(cmd, Ok(Command::Comment(_))) {
+            first_sig.get_or_insert(cmd);
+            last_sig = Some(cmd);
+        }
+    }
+    if !matches!(first_sig, Some(Ok(Command::Machine(MachineCode::HeaderStart)))) {
+        return Err(ExcellonError::MissingHeaderStart.into());
+    }
+    if !matches!(last_sig, Some(Ok(Command::Machine(MachineCode::EndOfProgram)))) {
+        return Err(ExcellonError::MissingEndOfProgram.into());
     }
     let mut header = commands
         .iter()
@@ -700,10 +762,7 @@ where
     if let Some(cmd) = commands.get(header.len()) {
         header.push(cmd.clone());
     } else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            ExcellonError::MissingHeaderEnd,
-        ));
+        return Err(ExcellonError::MissingHeaderEnd.into());
     }
     let commands = commands.into_iter().skip(header.len()).collect::<Vec<_>>();
     let format = header
@@ -751,12 +810,70 @@ mod tests {
     }
 
     #[test]
+    fn test_decimal_coords_xnc() -> Result<(), Box<dyn std::error::Error>> {
+        let raw = "M48\n\
+                   METRIC\n\
+                   T01C0.6\n\
+                   %\n\
+                   G05\n\
+                   T01\n\
+                   X9.01Y3.3375\n\
+                   X-1.5Y2\n\
+                   M30\n";
+        let data = parse_excellon(BufReader::new(Cursor::new(raw)))?;
+        assert!(data.unit.decimal);
+        assert_eq!(data.unit.unit, Unit::Millimeters);
+        let coords: Vec<_> = data
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                Ok(Command::Coordinate(x, y, _)) => Some((*x, *y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(coords, vec![(Some(9.01), Some(3.3375)), (Some(-1.5), Some(2.0))]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_unit_defaults() {
+        let inch = UnitDefinition::default_for(Unit::Inches);
+        assert_eq!((inch.leading, inch.trailing), (2, 4));
+        assert_eq!(inch.ty, ZeroSuppression::Leading);
+        let mm = UnitDefinition::default_for(Unit::Millimeters);
+        assert_eq!((mm.leading, mm.trailing), (3, 3));
+        assert_eq!(mm.ty, ZeroSuppression::Leading);
+    }
+
+    fn excellon_err(err: std::io::Error) -> ExcellonError {
+        err.into_inner()
+            .and_then(|e| e.downcast::<ExcellonError>().ok())
+            .map(|b| *b)
+            .expect("ExcellonError")
+    }
+
+    #[test]
+    fn test_missing_header_start() {
+        let raw = "METRIC\nM30\n";
+        let err = parse_excellon(BufReader::new(Cursor::new(raw))).unwrap_err();
+        assert!(matches!(excellon_err(err), ExcellonError::MissingHeaderStart));
+    }
+
+    #[test]
+    fn test_missing_end_of_program() {
+        let raw = "M48\nMETRIC\n%\nG05\n";
+        let err = parse_excellon(BufReader::new(Cursor::new(raw))).unwrap_err();
+        assert!(matches!(excellon_err(err), ExcellonError::MissingEndOfProgram));
+    }
+
+    #[test]
     fn test_leading_trailing() -> Result<(), Box<dyn std::error::Error>> {
         let fmt = UnitDefinition {
             leading: 3,
             trailing: 3,
             ty: ZeroSuppression::Leading,
             unit: Unit::Millimeters,
+            decimal: false,
         };
         let num = 12.34;
         let serialized = fmt.serialize(num);
@@ -771,6 +888,7 @@ mod tests {
             trailing: 3,
             ty: ZeroSuppression::Trailing,
             unit: Unit::Millimeters,
+            decimal: false,
         };
         let num = 12.34;
         let serialized = fmt.serialize(num);
