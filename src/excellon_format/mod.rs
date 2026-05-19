@@ -1,4 +1,3 @@
-use crate::excellon_format::Mode::Route;
 use crate::unit_able::UnitAble;
 use crate::{LayerData, LayerMerge, LayerStepAndRepeat, LayerTransform, Pos};
 use derive_more::{Display, Error};
@@ -9,7 +8,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::num::{ParseFloatError, ParseIntError};
 use winnow::ModalResult;
 use winnow::Parser;
-use winnow::ascii::{dec_uint, digit1, float};
+use winnow::ascii::{digit1, float};
 use winnow::combinator::{alt, opt, preceded};
 use winnow::error::ContextError;
 use winnow::token::take;
@@ -71,10 +70,12 @@ impl ExcellonLayerData {
     }
     /// Returns `true` if the layer contains no drill hit coordinates.
     pub fn is_empty(&self) -> bool {
-        !self
-            .commands
-            .iter()
-            .any(|x| matches!(x, Ok(Command::Coordinate(_, _, _))))
+        !self.commands.iter().any(|x| {
+            matches!(
+                x,
+                Ok(Command::Coordinate(_, _, _)) | Ok(Command::Slot { .. })
+            )
+        })
     }
 }
 
@@ -83,17 +84,27 @@ impl LayerTransform for ExcellonLayerData {
         let mut commands = Vec::new();
         commands.extend(self.header.iter_mut().filter_map(|x| x.as_mut().ok()));
         commands.extend(self.commands.iter_mut().filter_map(|x| x.as_mut().ok()));
-        commands.iter_mut().for_each(|cmd| {
-            if let Command::Coordinate(x, y, fmt) = cmd {
-                *x = x
-                    .to_mm(&fmt.unit)
-                    .map(|x| x + transform.x)
-                    .mm_to_unit(&fmt.unit);
-                *y = y
-                    .to_mm(&fmt.unit)
-                    .map(|y| y + transform.y)
-                    .mm_to_unit(&fmt.unit);
+        let shift = |v: &mut Option<f64>, delta: f64, unit: &Unit| {
+            *v = v.to_mm(unit).map(|n| n + delta).mm_to_unit(unit);
+        };
+        commands.iter_mut().for_each(|cmd| match cmd {
+            Command::Coordinate(x, y, fmt) => {
+                shift(x, transform.x, &fmt.unit);
+                shift(y, transform.y, &fmt.unit);
             }
+            Command::Slot {
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                fmt,
+            } => {
+                shift(from_x, transform.x, &fmt.unit);
+                shift(to_x, transform.x, &fmt.unit);
+                shift(from_y, transform.y, &fmt.unit);
+                shift(to_y, transform.y, &fmt.unit);
+            }
+            _ => {}
         })
     }
 }
@@ -160,6 +171,10 @@ impl LayerMerge for ExcellonLayerData {
             let mut command = command.clone();
             match &mut command {
                 Ok(Command::Coordinate(_, _, fmt)) => {
+                    fmt.leading = self.unit.leading;
+                    fmt.trailing = self.unit.trailing;
+                }
+                Ok(Command::Slot { fmt, .. }) => {
                     fmt.leading = self.unit.leading;
                     fmt.trailing = self.unit.trailing;
                 }
@@ -294,6 +309,16 @@ pub enum Command {
     ToolDefinition(ToolDefinition),
     /// `;…` — comment line.
     Comment(String),
+    /// `F<n>` — feed-rate setting.
+    FeedRate(u32),
+    /// `[X<a>Y<b>]G85X<c>Y<d>` — route (mill) a slot between two points.
+    Slot {
+        from_x: Option<f64>,
+        from_y: Option<f64>,
+        to_x: Option<f64>,
+        to_y: Option<f64>,
+        fmt: UnitDefinition,
+    },
 }
 
 impl Display for Command {
@@ -320,6 +345,29 @@ impl Display for Command {
             Command::Tool(id) => writeln!(f, "T{}", id),
             Command::ToolDefinition(td) => writeln!(f, "T{}C{:0.3}", &td.tool_number, &td.diameter),
             Command::Comment(c) => writeln!(f, ";{}", c),
+            Command::FeedRate(rate) => writeln!(f, "F{}", rate),
+            Command::Slot {
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                fmt,
+            } => {
+                if let Some(x) = from_x {
+                    write!(f, "X{}", &fmt.serialize(*x))?
+                };
+                if let Some(y) = from_y {
+                    write!(f, "Y{}", &fmt.serialize(*y))?
+                };
+                write!(f, "G85")?;
+                if let Some(x) = to_x {
+                    write!(f, "X{}", &fmt.serialize(*x))?
+                };
+                if let Some(y) = to_y {
+                    write!(f, "Y{}", &fmt.serialize(*y))?
+                };
+                writeln!(f)
+            }
         }
     }
 }
@@ -435,11 +483,21 @@ pub enum ZeroSuppression {
 pub enum GeometricCode {
     Mode(Mode),
     // Sleep time in seconds
-    VariableDwell(u16),   //G04X#
-    OverrideFeed,         // G07
-    InputMode(InputMode), // G90, G91
+    VariableDwell(u16),             //G04X#
+    OverrideFeed,                   // G07
+    InputMode(InputMode),           // G90, G91
+    CutterCompensation(CutterComp), // G40, G41, G42
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Display)]
+pub enum CutterComp {
+    #[display("G40")]
+    Off,
+    #[display("G41")]
+    Left,
+    #[display("G42")]
+    Right,
+}
 
 impl Display for GeometricCode {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -448,6 +506,7 @@ impl Display for GeometricCode {
             GeometricCode::VariableDwell(time) => write!(f, "G04X{}", time),
             GeometricCode::OverrideFeed => write!(f, "G07"),
             GeometricCode::InputMode(t) => t.fmt(f),
+            GeometricCode::CutterCompensation(c) => write!(f, "{}", c),
         }
     }
 }
@@ -460,28 +519,20 @@ pub enum InputMode {
     Incremental,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Display)]
 pub enum Mode {
-    Route(f64, f64), //G00
-    Linear,          // G01
-    CircularCW,      // G02
-    CircularCWW,     // G03
-    DrillMode,       // G05
-}
-
-impl Display for Mode {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            // TODO: Apply correct formatting
-            Mode::Route(x, y) => {
-                write!(f, "G00X{},{}", x, y)
-            }
-            Mode::Linear => write!(f, "G01"),
-            Mode::CircularCW => write!(f, "G02"),
-            Mode::CircularCWW => write!(f, "G03"),
-            Mode::DrillMode => write!(f, "G05"),
-        }
-    }
+    #[display("G00")]
+    Route,
+    #[display("G01")]
+    Linear,
+    #[display("G02")]
+    CircularCW,
+    #[display("G03")]
+    CircularCWW,
+    #[display("G05")]
+    DrillMode,
+    #[display("G81")]
+    CannedDrill,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -497,6 +548,8 @@ pub enum MachineCode {
     Scale(Unit),  // M71, M72
     HeaderEnd,    // M95
     RewindStop,   // %
+    RouterDown,   // M15
+    RouterUp,     // M17
 }
 
 impl Display for MachineCode {
@@ -508,6 +561,8 @@ impl Display for MachineCode {
             MachineCode::Scale(Unit::Inches) => write!(f, "M72"),
             MachineCode::HeaderEnd => write!(f, "M95"),
             MachineCode::RewindStop => write!(f, "%"),
+            MachineCode::RouterDown => write!(f, "M15"),
+            MachineCode::RouterUp => write!(f, "M17"),
         }
     }
 }
@@ -524,8 +579,11 @@ where
     parser.parse(input).map_err(|_| ())
 }
 
+// Excellon writes tool and G-code numbers zero-padded (`04`, `00`), which
+// winnow's `dec_uint` rejects; the call sites use `digit1.parse_to()` instead.
+
 fn parse_fmat(tail: &str) -> Result<LineResult, ExcellonError> {
-    run(tail, dec_uint::<_, u8, _>)
+    run(tail, digit1.parse_to::<u8>())
         .map(|v| LineResult::Command(Command::FormatCode(v)))
         .map_err(|_| ExcellonError::InvalidVersion)
 }
@@ -553,8 +611,7 @@ fn parse_unit(line: &str) -> Result<LineResult, ExcellonError> {
     ));
     let digits = opt(preceded(
         ',',
-        (digit1, '.', digit1)
-            .map(|(l, _, t): (&str, _, &str)| (l.len() as u8, t.len() as u8)),
+        (digit1, '.', digit1).map(|(l, _, t): (&str, _, &str)| (l.len() as u8, t.len() as u8)),
     ));
     let (unit, ty_opt, digits_opt) =
         run(line, (unit, ty, digits)).map_err(|_| ExcellonError::InvalidUnitDefinition)?;
@@ -562,19 +619,23 @@ fn parse_unit(line: &str) -> Result<LineResult, ExcellonError> {
     let decimal = ty_opt.is_none() && digits_opt.is_none();
     let default = UnitDefinition::default_for(unit);
     let (leading, trailing) = digits_opt.unwrap_or((default.leading, default.trailing));
-    Ok(LineResult::Command(Command::UnitDefinition(UnitDefinition {
-        ty: ty_opt.unwrap_or(default.ty),
-        leading,
-        trailing,
-        decimal,
-        ..default
-    })))
+    Ok(LineResult::Command(Command::UnitDefinition(
+        UnitDefinition {
+            ty: ty_opt.unwrap_or(default.ty),
+            leading,
+            trailing,
+            decimal,
+            ..default
+        },
+    )))
 }
 
 fn parse_machine(tail: &str, line: &str) -> Result<LineResult, ExcellonError> {
-    let code = run(tail, dec_uint::<_, u8, _>)
+    let code = run(tail, digit1.parse_to::<u8>())
         .map_err(|_| ExcellonError::InvalidCmd(line.to_string()))?;
     let mc = match code {
+        15 => MachineCode::RouterDown,
+        17 => MachineCode::RouterUp,
         30 => MachineCode::EndOfProgram,
         48 => MachineCode::HeaderStart,
         71 => MachineCode::Scale(Unit::Millimeters),
@@ -587,7 +648,7 @@ fn parse_machine(tail: &str, line: &str) -> Result<LineResult, ExcellonError> {
 
 fn parse_tool(tail: &str, line: &str) -> Result<LineResult, ExcellonError> {
     let parser = (
-        dec_uint::<_, u32, _>,
+        digit1.parse_to::<u32>(),
         opt(preceded('C', float::<_, f64, _>)),
     );
     match run(tail, parser) {
@@ -603,13 +664,12 @@ fn parse_tool(tail: &str, line: &str) -> Result<LineResult, ExcellonError> {
 }
 
 fn parse_geometric(tail: &str, line: &str) -> Result<LineResult, ExcellonError> {
-    let id_p = take(2usize).and_then(dec_uint::<_, u8, _>);
-    let dwell_p = opt(preceded('X', dec_uint::<_, u16, _>));
+    let id_p = take(2usize).and_then(digit1.parse_to::<u8>());
+    let dwell_p = opt(preceded('X', digit1.parse_to::<u16>()));
     let (id, dwell) =
         run(tail, (id_p, dwell_p)).map_err(|_| ExcellonError::InvalidCmd(line.to_string()))?;
     let code = match id {
-        // TODO: Deserialize Coords
-        0 => GeometricCode::Mode(Route(0.0, 0.0)),
+        0 => GeometricCode::Mode(Mode::Route),
         1 => GeometricCode::Mode(Mode::Linear),
         2 => GeometricCode::Mode(Mode::CircularCW),
         3 => GeometricCode::Mode(Mode::CircularCWW),
@@ -618,6 +678,10 @@ fn parse_geometric(tail: &str, line: &str) -> Result<LineResult, ExcellonError> 
         ),
         5 => GeometricCode::Mode(Mode::DrillMode),
         7 => GeometricCode::OverrideFeed,
+        40 => GeometricCode::CutterCompensation(CutterComp::Off),
+        41 => GeometricCode::CutterCompensation(CutterComp::Left),
+        42 => GeometricCode::CutterCompensation(CutterComp::Right),
+        81 => GeometricCode::Mode(Mode::CannedDrill),
         90 => GeometricCode::InputMode(InputMode::Absolute),
         91 => GeometricCode::InputMode(InputMode::Incremental),
         c => return Err(ExcellonError::InvalidGeometricCode(c)),
@@ -625,55 +689,109 @@ fn parse_geometric(tail: &str, line: &str) -> Result<LineResult, ExcellonError> 
     Ok(LineResult::Command(Command::Geometric(code)))
 }
 
-fn parse_coord(line: &str, fmt: &UnitDefinition) -> Result<LineResult, ExcellonError> {
-    fn inner<'i>(
-        input: &mut &'i str,
-    ) -> ModalResult<(Option<&'i str>, Option<&'i str>)> {
-        let val = |i: &mut &'i str| {
-            (opt('-'), digit1, opt(('.', digit1)))
-                .take()
-                .parse_next(i)
-        };
+// Parse an `X<n>Y<n>` coordinate fragment. Either axis may be absent; an
+// empty fragment yields `(None, None)` so a missing slot endpoint can carry
+// over the current position.
+fn parse_xy(
+    fragment: &str,
+    fmt: &UnitDefinition,
+) -> Result<(Option<f64>, Option<f64>), ExcellonError> {
+    if fragment.is_empty() {
+        return Ok((None, None));
+    }
+    fn inner<'i>(input: &mut &'i str) -> ModalResult<(Option<&'i str>, Option<&'i str>)> {
+        let val = |i: &mut &'i str| (opt('-'), digit1, opt(('.', digit1))).take().parse_next(i);
         (opt(preceded('X', val)), opt(preceded('Y', val))).parse_next(input)
     }
-    match inner.parse(line) {
-        Ok((x, y)) if x.is_some() || y.is_some() => Ok(LineResult::RawCoordinate(
+    match inner.parse(fragment) {
+        Ok((x, y)) if x.is_some() || y.is_some() => Ok((
             x.and_then(|t| fmt.parse_num(t).ok()),
             y.and_then(|t| fmt.parse_num(t).ok()),
         )),
-        _ => Err(ExcellonError::InvalidCoordinate(line.to_string())),
+        _ => Err(ExcellonError::InvalidCoordinate(fragment.to_string())),
     }
 }
 
-fn parse_line(line: &str, fmt: &UnitDefinition) -> Result<LineResult, ExcellonError> {
+fn parse_coord(line: &str, fmt: &UnitDefinition) -> Result<LineResult, ExcellonError> {
+    let (x, y) = parse_xy(line, fmt)?;
+    Ok(LineResult::RawCoordinate(x, y))
+}
+
+fn parse_feed(tail: &str, line: &str) -> Result<LineResult, ExcellonError> {
+    run(tail, digit1.parse_to::<u32>())
+        .map(|rate| LineResult::Command(Command::FeedRate(rate)))
+        .map_err(|_| ExcellonError::InvalidCmd(line.to_string()))
+}
+
+// Parse a `G`-prefixed line. Most G-codes stand alone, but routing files pack
+// a coordinate onto the same line (`G00X111Y3114`, `G01Y9019`); those yield
+// both the geometric command and the coordinate. `G04X<n>` keeps its dwell
+// argument and is parsed whole.
+fn parse_geometric_line(
+    line: &str,
+    fmt: &UnitDefinition,
+) -> Result<Vec<LineResult>, ExcellonError> {
+    let digits_end = line[1..]
+        .find(|c: char| !c.is_ascii_digit())
+        .map(|i| i + 1)
+        .unwrap_or(line.len());
+    let (gpart, rest) = line.split_at(digits_end);
+    // `G04X<n>` keeps its trailing X as a dwell argument, not a coordinate.
+    if gpart == "G04" || rest.is_empty() {
+        return Ok(vec![parse_geometric(&line[1..], line)?]);
+    }
+    Ok(vec![
+        parse_geometric(&gpart[1..], gpart)?,
+        parse_coord(rest, fmt)?,
+    ])
+}
+
+fn parse_line(line: &str, fmt: &UnitDefinition) -> Result<Vec<LineResult>, ExcellonError> {
     if let Some(stripped) = line.strip_prefix(';') {
-        return Ok(LineResult::Command(Command::Comment(stripped.to_string())));
+        return Ok(vec![LineResult::Command(Command::Comment(
+            stripped.to_string(),
+        ))]);
     }
     if line == "%" {
-        return Ok(LineResult::Command(Command::Machine(
+        return Ok(vec![LineResult::Command(Command::Machine(
             MachineCode::RewindStop,
-        )));
+        ))]);
     }
     if let Some(tail) = line.strip_prefix("FMAT,") {
-        return parse_fmat(tail);
+        return Ok(vec![parse_fmat(tail)?]);
     }
     if let Some(tail) = line.strip_prefix("ICI") {
-        return parse_ici(tail);
+        return Ok(vec![parse_ici(tail)?]);
     }
     if line.starts_with("METRIC") || line.starts_with("INCH") {
-        return parse_unit(line);
+        return Ok(vec![parse_unit(line)?]);
+    }
+    // `[X<a>Y<b>]G85X<c>Y<d>` — a routed slot (canned milling cycle).
+    if let Some((before, after)) = line.split_once("G85") {
+        let (from_x, from_y) = parse_xy(before, fmt)?;
+        let (to_x, to_y) = parse_xy(after, fmt)?;
+        return Ok(vec![LineResult::Command(Command::Slot {
+            from_x,
+            from_y,
+            to_x,
+            to_y,
+            fmt: fmt.clone(),
+        })]);
     }
     if let Some(tail) = line.strip_prefix('M') {
-        return parse_machine(tail, line);
+        return Ok(vec![parse_machine(tail, line)?]);
     }
     if let Some(tail) = line.strip_prefix('T') {
-        return parse_tool(tail, line);
+        return Ok(vec![parse_tool(tail, line)?]);
     }
-    if let Some(tail) = line.strip_prefix('G') {
-        return parse_geometric(tail, line);
+    if let Some(tail) = line.strip_prefix('F') {
+        return Ok(vec![parse_feed(tail, line)?]);
+    }
+    if line.starts_with('G') {
+        return parse_geometric_line(line, fmt);
     }
     if line.starts_with('X') || line.starts_with('Y') {
-        return parse_coord(line, fmt);
+        return Ok(vec![parse_coord(line, fmt)?]);
     }
     Err(ExcellonError::InvalidCmd(line.to_string()))
 }
@@ -697,39 +815,51 @@ where
             line_number += 1;
             continue;
         }
-        let cmd_result = match parse_line(trimmed, &format) {
-            Ok(LineResult::Command(cmd)) => {
-                match &cmd {
-                    Command::UnitDefinition(unit) => {
-                        format = unit.clone();
-                        unit_set = true;
-                    }
-                    Command::Machine(MachineCode::Scale(u)) => format.unit = *u,
-                    Command::ToolDefinition(td) => {
-                        tools.insert(td.tool_number, td.diameter);
-                    }
-                    Command::Tool(id) => {
-                        if !tools.contains_key(id) {
-                            return Err(ExcellonError::InvalidToolNumber(*id).into());
+        // A single source line may yield several commands (e.g. a G-code
+        // with a coordinate, `G00X111Y3114`); each is recorded separately.
+        match parse_line(trimmed, &format) {
+            Ok(results) => {
+                for result in results {
+                    let cmd_result = match result {
+                        LineResult::Command(cmd) => {
+                            match &cmd {
+                                Command::UnitDefinition(unit) => {
+                                    format = unit.clone();
+                                    unit_set = true;
+                                }
+                                Command::Machine(MachineCode::Scale(u)) => format.unit = *u,
+                                Command::ToolDefinition(td) => {
+                                    tools.insert(td.tool_number, td.diameter);
+                                }
+                                Command::Tool(id) => {
+                                    if !tools.contains_key(id) {
+                                        return Err(ExcellonError::InvalidToolNumber(*id).into());
+                                    }
+                                }
+                                _ => {}
+                            }
+                            Ok(cmd)
                         }
-                    }
-                    _ => {}
+                        LineResult::RawCoordinate(_, _) if !unit_set => {
+                            Err(ExcellonError::CoordinateBeforeUnit)
+                        }
+                        LineResult::RawCoordinate(x, y) => {
+                            Ok(Command::Coordinate(x, y, format.clone()))
+                        }
+                    };
+                    commands.push(cmd_result.map_err(|e| ExcellonParseFormat {
+                        source: e,
+                        line: line_number,
+                        content: trimmed.to_string(),
+                    }));
                 }
-                Ok(cmd)
             }
-            Ok(LineResult::RawCoordinate(_, _)) if !unit_set => {
-                Err(ExcellonError::CoordinateBeforeUnit)
-            }
-            Ok(LineResult::RawCoordinate(x, y)) => {
-                Ok(Command::Coordinate(x, y, format.clone()))
-            }
-            Err(err) => Err(err),
-        };
-        commands.push(cmd_result.map_err(|e| ExcellonParseFormat {
-            source: e,
-            line: line_number,
-            content: trimmed.to_string(),
-        }));
+            Err(err) => commands.push(Err(ExcellonParseFormat {
+                source: err,
+                line: line_number,
+                content: trimmed.to_string(),
+            })),
+        }
         buf.clear();
         line_number += 1;
     }
@@ -742,10 +872,16 @@ where
             last_sig = Some(cmd);
         }
     }
-    if !matches!(first_sig, Some(Ok(Command::Machine(MachineCode::HeaderStart)))) {
+    if !matches!(
+        first_sig,
+        Some(Ok(Command::Machine(MachineCode::HeaderStart)))
+    ) {
         return Err(ExcellonError::MissingHeaderStart.into());
     }
-    if !matches!(last_sig, Some(Ok(Command::Machine(MachineCode::EndOfProgram)))) {
+    if !matches!(
+        last_sig,
+        Some(Ok(Command::Machine(MachineCode::EndOfProgram)))
+    ) {
         return Err(ExcellonError::MissingEndOfProgram.into());
     }
     let mut header = commands
@@ -831,7 +967,67 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(coords, vec![(Some(9.01), Some(3.3375)), (Some(-1.5), Some(2.0))]);
+        assert_eq!(
+            coords,
+            vec![(Some(9.01), Some(3.3375)), (Some(-1.5), Some(2.0))]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_routing_program() -> Result<(), Box<dyn std::error::Error>> {
+        // G-codes packed with coordinates, cutter compensation, feed rate,
+        // router up/down, a canned-cycle switch and a G85 slot.
+        let raw = "M48\n\
+                   FMAT,1\n\
+                   INCH,TZ,00.0000\n\
+                   T04C0.0787\n\
+                   %\n\
+                   T04\n\
+                   G00X111Y3114\n\
+                   G41\n\
+                   F059\n\
+                   M15\n\
+                   G01Y9019\n\
+                   X10938\n\
+                   M17\n\
+                   G81\n\
+                   X30784Y24630G85X30896Y24443\n\
+                   M30\n";
+        let data = parse_excellon(BufReader::new(Cursor::new(raw)))?;
+        for cmd in &data.header {
+            cmd.clone()?;
+        }
+        for cmd in &data.commands {
+            cmd.clone()?;
+        }
+        let count = |pred: fn(&Command) -> bool| {
+            data.commands
+                .iter()
+                .filter(|c| c.as_ref().is_ok_and(pred))
+                .count()
+        };
+        // `G00X111Y3114` and `G01Y9019` each split into a mode + a coordinate.
+        assert_eq!(count(|c| matches!(c, Command::Coordinate(..))), 3);
+        assert_eq!(count(|c| matches!(c, Command::Slot { .. })), 1);
+        assert_eq!(count(|c| matches!(c, Command::FeedRate(_))), 1);
+        assert!(
+            data.commands
+                .iter()
+                .any(|c| matches!(c, Ok(Command::Machine(MachineCode::RouterDown))))
+        );
+        assert!(data.commands.iter().any(|c| matches!(
+            c,
+            Ok(Command::Geometric(GeometricCode::CutterCompensation(
+                CutterComp::Left
+            )))
+        )));
+        // Round-trip: G00 must serialize without a placeholder coordinate.
+        let mut out = BufWriter::new(Vec::new());
+        data.write_to(&mut out)?;
+        let serialized = String::from_utf8(out.into_inner()?)?;
+        assert!(serialized.contains("G00\n"), "G00 missing: {serialized}");
+        assert!(!serialized.contains("G00X"), "G00 still carries a stub coord: {serialized}");
         Ok(())
     }
 
@@ -856,14 +1052,20 @@ mod tests {
     fn test_missing_header_start() {
         let raw = "METRIC\nM30\n";
         let err = parse_excellon(BufReader::new(Cursor::new(raw))).unwrap_err();
-        assert!(matches!(excellon_err(err), ExcellonError::MissingHeaderStart));
+        assert!(matches!(
+            excellon_err(err),
+            ExcellonError::MissingHeaderStart
+        ));
     }
 
     #[test]
     fn test_missing_end_of_program() {
         let raw = "M48\nMETRIC\n%\nG05\n";
         let err = parse_excellon(BufReader::new(Cursor::new(raw))).unwrap_err();
-        assert!(matches!(excellon_err(err), ExcellonError::MissingEndOfProgram));
+        assert!(matches!(
+            excellon_err(err),
+            ExcellonError::MissingEndOfProgram
+        ));
     }
 
     #[test]

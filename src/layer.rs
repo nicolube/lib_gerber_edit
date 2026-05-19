@@ -27,6 +27,21 @@ pub struct Layer {
     pub data: LayerData,
 }
 
+// True when a file's first significant line is the Excellon header marker
+// `M48`. CAM tools sometimes emit drill or routing data under a Gerber-style
+// extension (e.g. a routing program named `*.gm2`); sniffing the content
+// routes those to the Excellon parser instead of failing as Gerber.
+fn looks_like_excellon(buf: &[u8]) -> bool {
+    for line in buf.split(|&b| b == b'\n') {
+        let line = line.trim_ascii();
+        if line.is_empty() || line.first() == Some(&b';') {
+            continue;
+        }
+        return line == b"M48";
+    }
+    false
+}
+
 impl LayerData {
     pub fn parse<T>(
         ty: LayerType,
@@ -35,35 +50,26 @@ impl LayerData {
     where
         T: Read,
     {
-        Ok(match ty {
-            LayerType::Drill => {
-                let mut buf = Vec::new();
-                reader
-                    .read_to_end(&mut buf)
-                    .map_err(ParseError::ExcellonParseError)?;
-                match parse_excellon(BufReader::new(Cursor::new(&buf))) {
-                    Ok(data) => (ty, LayerData::Excellon(data)),
-                    Err(excellon_err) => {
-                        debug!("Excellon parse failed, trying Gerber: {}", excellon_err);
-                        (
-                            ty,
-                            LayerData::Gerber(GerberLayerData::from_type(
-                                ty,
-                                BufReader::new(Cursor::new(buf)),
-                            )?),
-                        )
-                    }
-                }
+        if ty == LayerType::UndefinedGerber {
+            let layer = GerberLayerData::from_commands(reader)?;
+            return Ok((layer.layer_type, LayerData::Gerber(layer)));
+        }
+        let mut buf = Vec::new();
+        reader
+            .read_to_end(&mut buf)
+            .map_err(ParseError::ExcellonParseError)?;
+        // `LayerType::Drill` always tries Excellon; for Gerber-style extensions
+        // we content-sniff so a misnamed drill/routing file (e.g. `*.gm2`)
+        // still parses.
+        let try_excellon = ty == LayerType::Drill || looks_like_excellon(&buf);
+        if try_excellon {
+            match parse_excellon(BufReader::new(Cursor::new(&buf))) {
+                Ok(data) => return Ok((ty, LayerData::Excellon(data))),
+                Err(err) => debug!("Excellon parse failed for {ty:?}, trying Gerber: {err}"),
             }
-            LayerType::UndefinedGerber => {
-                let layer = GerberLayerData::from_commands(reader)?;
-                (layer.layer_type, LayerData::Gerber(layer))
-            }
-            _ => (
-                ty,
-                LayerData::Gerber(GerberLayerData::from_type(ty, reader)?),
-            ),
-        })
+        }
+        let gerber = GerberLayerData::from_type(ty, BufReader::new(Cursor::new(buf)))?;
+        Ok((ty, LayerData::Gerber(gerber)))
     }
 
     pub fn write_to<T>(&self, writer: &mut BufWriter<T>) -> GerberResult<()>
