@@ -285,20 +285,18 @@ impl LayerCorners for Board {
             if [LayerType::KeepOut, LayerType::Info, LayerType::SidePlating].contains(&layer.ty) {
                 continue;
             }
-            if let LayerData::Gerber(layer) = &layer.data {
-                let (layer_min, layer_max) = layer.get_corners();
-                if layer_min.x < min.x {
-                    min.x = layer_min.x;
-                }
-                if layer_max.x > max.x {
-                    max.x = layer_max.x;
-                }
-                if layer_min.y < min.y {
-                    min.y = layer_min.y;
-                }
-                if layer_max.y > max.y {
-                    max.y = layer_max.y;
-                }
+            let (layer_min, layer_max) = layer.get_corners();
+            if layer_min.x < min.x {
+                min.x = layer_min.x;
+            }
+            if layer_max.x > max.x {
+                max.x = layer_max.x;
+            }
+            if layer_min.y < min.y {
+                min.y = layer_min.y;
+            }
+            if layer_max.y > max.y {
+                max.y = layer_max.y;
             }
         }
         (min, max)

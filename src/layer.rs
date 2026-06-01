@@ -1,7 +1,7 @@
 use crate::error::ParseError;
 use crate::excellon_format::{ExcellonLayerData, parse_excellon};
 use crate::gerber::GerberLayerData;
-use crate::{LayerMerge, LayerStepAndRepeat, LayerTransform, Pos};
+use crate::{LayerCorners, LayerMerge, LayerStepAndRepeat, LayerTransform, Pos};
 use gerber_parser::gerber_types::{
     Command, CommentContent, ExtendedCode, ExtendedPosition, FileAttribute, FileFunction,
     FunctionCode, GCode, GerberResult, Position, Profile, StandardComment,
@@ -122,6 +122,33 @@ impl LayerTransform for LayerData {
             LayerData::Gerber(s) => s.transform(transform),
             LayerData::Info(_) => {}
         }
+    }
+}
+
+impl LayerCorners for LayerData {
+    fn get_corners(&self) -> (Pos, Pos) {
+        match self {
+            LayerData::Gerber(g) => g.get_corners(),
+            LayerData::Excellon(e) => e.get_corners(),
+            // Info layers carry no geometry: return an empty box that
+            // contributes nothing when unioned with real layers.
+            LayerData::Info(_) => (
+                Pos {
+                    x: f64::MAX,
+                    y: f64::MAX,
+                },
+                Pos {
+                    x: f64::MIN,
+                    y: f64::MIN,
+                },
+            ),
+        }
+    }
+}
+
+impl LayerCorners for Layer {
+    fn get_corners(&self) -> (Pos, Pos) {
+        self.data.get_corners()
     }
 }
 
