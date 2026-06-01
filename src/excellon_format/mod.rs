@@ -1142,7 +1142,10 @@ mod tests {
         data.write_to(&mut out)?;
         let serialized = String::from_utf8(out.into_inner()?)?;
         assert!(serialized.contains("G00\n"), "G00 missing: {serialized}");
-        assert!(!serialized.contains("G00X"), "G00 still carries a stub coord: {serialized}");
+        assert!(
+            !serialized.contains("G00X"),
+            "G00 still carries a stub coord: {serialized}"
+        );
         Ok(())
     }
 
