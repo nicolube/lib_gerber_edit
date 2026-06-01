@@ -1,5 +1,7 @@
 use crate::unit_able::UnitAble;
-use crate::{LayerData, LayerMerge, LayerStepAndRepeat, LayerTransform, Pos};
+use crate::{
+    LayerCorners, LayerData, LayerMerge, LayerScale, LayerStepAndRepeat, LayerTransform, Pos,
+};
 use derive_more::{Display, Error};
 use gerber_parser::gerber_types::Unit;
 use std::collections::HashMap;
@@ -231,6 +233,115 @@ impl LayerStepAndRepeat for ExcellonLayerData {
                 self.merge(&copy);
             }
         }
+    }
+}
+
+impl LayerScale for ExcellonLayerData {
+    fn scale(&mut self, x: f64, y: f64) {
+        let mul = |v: &mut Option<f64>, factor: f64| {
+            if let Some(v) = v {
+                *v *= factor;
+            }
+        };
+        for command in self.commands.iter_mut().filter_map(|c| c.as_mut().ok()) {
+            match command {
+                Command::Coordinate(cx, cy, _) => {
+                    mul(cx, x);
+                    mul(cy, y);
+                }
+                Command::Slot {
+                    from_x,
+                    from_y,
+                    to_x,
+                    to_y,
+                    ..
+                } => {
+                    mul(from_x, x);
+                    mul(to_x, x);
+                    mul(from_y, y);
+                    mul(to_y, y);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl LayerCorners for ExcellonLayerData {
+    fn get_corners(&self) -> (Pos, Pos) {
+        let mut min = Pos {
+            x: f64::MAX,
+            y: f64::MAX,
+        };
+        let mut max = Pos {
+            x: f64::MIN,
+            y: f64::MIN,
+        };
+        // Drill diameter (mm) of the currently selected tool.
+        let mut radius = 0.0;
+        let mut current = Pos::default();
+        let mut incremental = self
+            .header
+            .iter()
+            .rev()
+            .find_map(|x| match x {
+                Ok(Command::Incremental(i)) => Some(*i),
+                _ => None,
+            })
+            .unwrap_or(false);
+
+        for command in self.commands.iter().flatten() {
+            match command {
+                Command::Tool(id) => {
+                    radius = self
+                        .tools
+                        .get(id)
+                        .map(|d| d.to_mm(&self.unit.unit) / 2.0)
+                        .unwrap_or(0.0);
+                }
+                Command::Geometric(GeometricCode::InputMode(im)) => {
+                    incremental = *im == InputMode::Incremental;
+                }
+                Command::Coordinate(x, y, fmt) => {
+                    let cx = x.map(|v| v.to_mm(&fmt.unit));
+                    let cy = y.map(|v| v.to_mm(&fmt.unit));
+                    if incremental {
+                        current.x += cx.unwrap_or(0.0);
+                        current.y += cy.unwrap_or(0.0);
+                    } else {
+                        current.x = cx.unwrap_or(current.x);
+                        current.y = cy.unwrap_or(current.y);
+                    }
+                    min.x = min.x.min(current.x - radius);
+                    min.y = min.y.min(current.y - radius);
+                    max.x = max.x.max(current.x + radius);
+                    max.y = max.y.max(current.y + radius);
+                }
+                Command::Slot {
+                    from_x,
+                    from_y,
+                    to_x,
+                    to_y,
+                    fmt,
+                } => {
+                    // Both endpoints bound the milled slot; tool width expands it.
+                    let from = Pos {
+                        x: from_x.map(|v| v.to_mm(&fmt.unit)).unwrap_or(current.x),
+                        y: from_y.map(|v| v.to_mm(&fmt.unit)).unwrap_or(current.y),
+                    };
+                    current.x = to_x.map(|v| v.to_mm(&fmt.unit)).unwrap_or(current.x);
+                    current.y = to_y.map(|v| v.to_mm(&fmt.unit)).unwrap_or(current.y);
+                    for p in [&from, &current] {
+                        min.x = min.x.min(p.x - radius);
+                        min.y = min.y.min(p.y - radius);
+                        max.x = max.x.max(p.x + radius);
+                        max.y = max.y.max(p.y + radius);
+                    }
+                }
+                _ => {}
+            }
+        }
+        (min, max)
     }
 }
 
@@ -1028,6 +1139,49 @@ mod tests {
         let serialized = String::from_utf8(out.into_inner()?)?;
         assert!(serialized.contains("G00\n"), "G00 missing: {serialized}");
         assert!(!serialized.contains("G00X"), "G00 still carries a stub coord: {serialized}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_scale() -> Result<(), Box<dyn std::error::Error>> {
+        let raw = "M48\n\
+                   METRIC\n\
+                   T01C0.6\n\
+                   %\n\
+                   G05\n\
+                   T01\n\
+                   X2Y3\n\
+                   M30\n";
+        let mut data = parse_excellon(BufReader::new(Cursor::new(raw)))?;
+        data.scale(2.0, 3.0);
+        let coords: Vec<_> = data
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                Ok(Command::Coordinate(x, y, _)) => Some((*x, *y)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(coords, vec![(Some(4.0), Some(9.0))]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_corners() -> Result<(), Box<dyn std::error::Error>> {
+        let raw = "M48\n\
+                   METRIC\n\
+                   T01C2.0\n\
+                   %\n\
+                   G05\n\
+                   T01\n\
+                   X0Y0\n\
+                   X10Y5\n\
+                   M30\n";
+        let data = parse_excellon(BufReader::new(Cursor::new(raw)))?;
+        let (min, max) = data.get_corners();
+        // Tool radius 1.0mm expands the hull around (0,0) and (10,5).
+        assert_eq!((min.x, min.y), (-1.0, -1.0));
+        assert_eq!((max.x, max.y), (11.0, 6.0));
         Ok(())
     }
 
