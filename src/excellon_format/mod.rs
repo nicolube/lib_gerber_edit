@@ -559,12 +559,16 @@ impl UnitDefinition {
 
     fn serialize(&self, num: f64) -> String {
         if self.decimal {
-            return format!("{}", num);
+            // Decimal (XNC) keeps full precision; round to 6 places to strip
+            // binary-float noise (e.g. 0.19999999998 -> 0.2) then trim zeros.
+            let s = format!("{:.6}", num);
+            let s = s.trim_end_matches('0').trim_end_matches('.');
+            return s.to_string();
         }
         if num == 0.0 {
             return "0".to_string();
         }
-        let num = num * (10i32.pow(self.trailing as u32) as f64);
+        let num = (num * (10i32.pow(self.trailing as u32) as f64)).round();
         let fmt = format!(
             "{:0a$}",
             num.abs() as isize,
@@ -1183,6 +1187,31 @@ mod tests {
         assert_eq!((min.x, min.y), (-1.0, -1.0));
         assert_eq!((max.x, max.y), (11.0, 6.0));
         Ok(())
+    }
+
+    #[test]
+    fn test_serialize_no_float_noise() {
+        // Decimal (XNC) mode: float noise must not leak into output.
+        let dec = UnitDefinition {
+            decimal: true,
+            ..UnitDefinition::default_for(Unit::Millimeters)
+        };
+        assert_eq!(dec.serialize(0.1 + 0.2), "0.3");
+        assert_eq!(dec.serialize(3.3375), "3.3375");
+        assert_eq!(dec.serialize(-1.5), "-1.5");
+        assert_eq!(dec.serialize(2.0), "2");
+
+        // Fixed-point mode rounds rather than truncates.
+        let fmt = UnitDefinition {
+            leading: 3,
+            trailing: 3,
+            ty: ZeroSuppression::Leading,
+            unit: Unit::Millimeters,
+            decimal: false,
+        };
+        // 0.2 * 1000 = 199.9999… must round to 200 ("0002" -> trim -> "0002"? LZ trims trailing)
+        assert_eq!(fmt.parse_num(&fmt.serialize(0.2)).unwrap(), 0.2);
+        assert_eq!(fmt.parse_num(&fmt.serialize(12.34)).unwrap(), 12.34);
     }
 
     #[test]
