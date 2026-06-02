@@ -57,7 +57,7 @@ where
     T: UnitAble + Sized + Copy,
 {
     fn mm_to_unit(&self, unit: &Unit) -> Self {
-        self.map(|n| n.to_mm(unit))
+        self.map(|n| n.mm_to_unit(unit))
     }
 
     fn to_mm(&self, unit: &Unit) -> Self {
