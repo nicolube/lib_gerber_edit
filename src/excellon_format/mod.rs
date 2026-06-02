@@ -558,31 +558,26 @@ impl UnitDefinition {
     }
 
     fn serialize(&self, num: f64) -> String {
-        if self.decimal {
-            // Decimal (XNC) keeps full precision; round to 6 places to strip
-            // binary-float noise (e.g. 0.19999999998 -> 0.2) then trim zeros.
-            let s = format!("{:.6}", num);
-            let s = s.trim_end_matches('0').trim_end_matches('.');
-            return s.to_string();
-        }
-        if num == 0.0 {
-            return "0".to_string();
-        }
-        let num = (num * (10i32.pow(self.trailing as u32) as f64)).round();
-        let fmt = format!(
-            "{:0a$}",
-            num.abs() as isize,
-            a = (self.leading + self.trailing) as usize
-        );
-        format!(
-            "{}{}",
-            if num < 0.0 { "-" } else { "" },
-            if self.ty == ZeroSuppression::Trailing {
-                fmt.trim_start_matches('0')
-            } else {
-                fmt.trim_end_matches('0')
-            }
-        )
+        // Always emit an explicit decimal point. Zero-suppressed integer
+        // coordinates (a bare "1" meaning 10.0 or 0.0001 depending on the
+        // format header) are mis-read by many drill programs; an explicit
+        // point is self-describing and honored by every reader regardless of
+        // the declared LZ/TZ format. `parse_num` still reads legacy
+        // zero-suppressed input on the way in.
+        //
+        // Round to the format's resolution (decimal/XNC uses 6 places to strip
+        // binary-float noise like 0.19999999998 -> 0.2), then trim redundant
+        // trailing zeros while keeping at least one fractional digit ("10.0").
+        let decimals = if self.decimal {
+            6
+        } else {
+            (self.trailing as usize).max(1)
+        };
+        let mut s = format!("{:.*}", decimals, num);
+        let dot = s.find('.').expect("decimals >= 1 guarantees a point");
+        let last_nonzero = s.rfind(|c| c != '0').expect("string is non-empty");
+        s.truncate(last_nonzero.max(dot + 1) + 1);
+        s
     }
 }
 
@@ -1202,7 +1197,8 @@ mod tests {
         assert_eq!(dec.serialize(0.1 + 0.2), "0.3");
         assert_eq!(dec.serialize(3.3375), "3.3375");
         assert_eq!(dec.serialize(-1.5), "-1.5");
-        assert_eq!(dec.serialize(2.0), "2");
+        // Always keep an explicit decimal point with at least one digit.
+        assert_eq!(dec.serialize(2.0), "2.0");
 
         // Fixed-point mode rounds rather than truncates.
         let fmt = UnitDefinition {
@@ -1263,14 +1259,12 @@ mod tests {
             unit: Unit::Millimeters,
             decimal: false,
         };
-        let num = 12.34;
-        let serialized = fmt.serialize(num);
-        assert_eq!(serialized, "01234");
-        assert_eq!(fmt.parse_num(&serialized)?, num);
-        let num = -12.34;
-        let serialized = fmt.serialize(num);
-        assert_eq!(serialized, "-01234");
-        assert_eq!(fmt.parse_num(&serialized)?, num);
+        // Output is always explicit-decimal regardless of LZ/TZ format, but
+        // the reader still parses legacy zero-suppressed coordinates.
+        assert_eq!(fmt.serialize(12.34), "12.34");
+        assert_eq!(fmt.serialize(-12.34), "-12.34");
+        assert_eq!(fmt.parse_num("01234")?, 12.34); // LZ-suppressed input
+        assert_eq!(fmt.parse_num("-01234")?, -12.34);
         let fmt = UnitDefinition {
             leading: 3,
             trailing: 3,
@@ -1278,14 +1272,10 @@ mod tests {
             unit: Unit::Millimeters,
             decimal: false,
         };
-        let num = 12.34;
-        let serialized = fmt.serialize(num);
-        assert_eq!(serialized, "12340");
-        assert_eq!(fmt.parse_num(&serialized)?, num);
-        let num = -12.34;
-        let serialized = fmt.serialize(num);
-        assert_eq!(serialized, "-12340");
-        assert_eq!(fmt.parse_num(&serialized)?, num);
+        assert_eq!(fmt.serialize(12.34), "12.34");
+        assert_eq!(fmt.serialize(-12.34), "-12.34");
+        assert_eq!(fmt.parse_num("12340")?, 12.34); // TZ-suppressed input
+        assert_eq!(fmt.parse_num("-12340")?, -12.34);
         Ok(())
     }
 }
