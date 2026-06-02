@@ -269,9 +269,9 @@ impl Board {
 impl LayerCorners for Board {
     /// Returns the bounding box of the board.
     ///
-    /// Computed as the union of all Gerber layer corners, excluding
-    /// `KeepOut`, `Info`, and `SidePlating` layers as they don't represent
-    /// physical board area. Excellon layers are also excluded.
+    /// Computed as the union of all layer corners (Gerber and Excellon drill),
+    /// excluding `KeepOut`, `Info`, and `SidePlating` layers as they don't
+    /// represent physical board area.
     fn get_corners(&self) -> (Pos, Pos) {
         let mut min = Pos {
             x: f64::MAX,
@@ -282,7 +282,9 @@ impl LayerCorners for Board {
             y: f64::MIN,
         };
         for layer in self.0.iter() {
-            if [LayerType::KeepOut, LayerType::Info, LayerType::SidePlating].contains(&layer.ty) {
+            if [LayerType::KeepOut, LayerType::Info, LayerType::SidePlating].contains(&layer.ty)
+                || matches!(layer.data, LayerData::Info(_))
+            {
                 continue;
             }
             let (layer_min, layer_max) = layer.get_corners();

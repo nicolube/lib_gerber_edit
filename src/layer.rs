@@ -130,18 +130,13 @@ impl LayerCorners for LayerData {
         match self {
             LayerData::Gerber(g) => g.get_corners(),
             LayerData::Excellon(e) => e.get_corners(),
-            // Info layers carry no geometry: return an empty box that
-            // contributes nothing when unioned with real layers.
-            LayerData::Info(_) => (
-                Pos {
-                    x: f64::MAX,
-                    y: f64::MAX,
-                },
-                Pos {
-                    x: f64::MIN,
-                    y: f64::MIN,
-                },
-            ),
+            // Info layers carry no geometry; callers must exclude them before
+            // computing bounds (see `Board::get_corners`).
+            LayerData::Info(_) => {
+                unreachable!(
+                    "Info layers have no geometry; exclude them before calling get_corners"
+                )
+            }
         }
     }
 }
