@@ -670,15 +670,15 @@ fn rotate_and_translate_coords(
     }
     x += dx;
     y += dy;
-    if let Some(ref mut xc) = coords.x {
-        if let Ok(v) = CoordinateNumber::try_from(x) {
-            *xc = v;
-        }
+    if let Some(ref mut xc) = coords.x
+        && let Ok(v) = CoordinateNumber::try_from(x)
+    {
+        *xc = v;
     }
-    if let Some(ref mut yc) = coords.y {
-        if let Ok(v) = CoordinateNumber::try_from(y) {
-            *yc = v;
-        }
+    if let Some(ref mut yc) = coords.y
+        && let Ok(v) = CoordinateNumber::try_from(y)
+    {
+        *yc = v;
     }
 }
 
@@ -791,7 +791,13 @@ impl LayerRotate for GerberLayerData {
         let cx = (min.x + max.x) * 0.5;
         let cy = (min.y + max.y) * 0.5;
         let (rcx, rcy) = crate::rotate_90(cx, cy, steps);
-        self.rebase(steps, &Pos { x: cx - rcx, y: cy - rcy });
+        self.rebase(
+            steps,
+            &Pos {
+                x: cx - rcx,
+                y: cy - rcy,
+            },
+        );
     }
 
     fn rebase(&mut self, steps: i32, offset: &Pos) {

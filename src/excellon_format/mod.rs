@@ -115,8 +115,12 @@ impl LayerTransform for ExcellonLayerData {
 fn rotate_excellon_coordinates(e: &mut ExcellonLayerData, rot: i32) {
     let rot_pair = |x: &mut Option<f64>, y: &mut Option<f64>| {
         let (rx, ry) = crate::rotate_90(x.unwrap_or(0.0), y.unwrap_or(0.0), rot);
-        if x.is_some() { *x = Some(rx); }
-        if y.is_some() { *y = Some(ry); }
+        if x.is_some() {
+            *x = Some(rx);
+        }
+        if y.is_some() {
+            *y = Some(ry);
+        }
     };
     for cmd in e
         .header
@@ -126,7 +130,13 @@ fn rotate_excellon_coordinates(e: &mut ExcellonLayerData, rot: i32) {
     {
         match cmd {
             Command::Coordinate(x, y, _) => rot_pair(x, y),
-            Command::Slot { from_x, from_y, to_x, to_y, .. } => {
+            Command::Slot {
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                ..
+            } => {
                 rot_pair(from_x, from_y);
                 rot_pair(to_x, to_y);
             }
@@ -145,7 +155,13 @@ impl LayerRotate for ExcellonLayerData {
         let cx = (min.x + max.x) * 0.5;
         let cy = (min.y + max.y) * 0.5;
         let (rcx, rcy) = crate::rotate_90(cx, cy, steps);
-        self.rebase(steps, &Pos { x: cx - rcx, y: cy - rcy });
+        self.rebase(
+            steps,
+            &Pos {
+                x: cx - rcx,
+                y: cy - rcy,
+            },
+        );
     }
 
     fn rebase(&mut self, steps: i32, offset: &Pos) {
@@ -987,10 +1003,8 @@ where
                                 Command::ToolDefinition(td) => {
                                     tools.insert(td.tool_number, td.diameter);
                                 }
-                                Command::Tool(id) => {
-                                    if !tools.contains_key(id) {
-                                        return Err(ExcellonError::InvalidToolNumber(*id).into());
-                                    }
+                                Command::Tool(id) if !tools.contains_key(id) => {
+                                    return Err(ExcellonError::InvalidToolNumber(*id).into());
                                 }
                                 _ => {}
                             }

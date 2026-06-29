@@ -324,7 +324,13 @@ impl LayerRotate for Board {
         let cx = (min.x + max.x) * 0.5;
         let cy = (min.y + max.y) * 0.5;
         let (rcx, rcy) = crate::rotate_90(cx, cy, steps);
-        self.rebase(steps, &Pos { x: cx - rcx, y: cy - rcy });
+        self.rebase(
+            steps,
+            &Pos {
+                x: cx - rcx,
+                y: cy - rcy,
+            },
+        );
     }
 
     fn rebase(&mut self, steps: i32, offset: &Pos) {
