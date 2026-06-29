@@ -2,8 +2,8 @@ use crate::error::ParseError;
 use crate::gerber_types::{CoordinateOffset, InterpolationMode};
 use crate::unit_able::UnitAble;
 use crate::{
-    LayerCorners, LayerData, LayerMerge, LayerScale, LayerStepAndRepeat, LayerTransform, LayerType,
-    Pos,
+    LayerCorners, LayerData, LayerMerge, LayerRotate, LayerScale, LayerStepAndRepeat,
+    LayerTransform, LayerType, Pos,
 };
 use chrono::Utc;
 use gerber_parser::GerberDoc;
@@ -13,7 +13,7 @@ use gerber_parser::gerber_types::{
     FunctionCode, GCode, GerberCode, GerberDate, GerberResult, ImageName, MCode, MacroContent,
     Operation, Polarity, QuadrantMode, StandardComment, StepAndRepeat, Unit, ZeroOmission,
 };
-use log::debug;
+use log::{debug, warn};
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Read, Write};
 
@@ -647,6 +647,154 @@ macro_rules! coord_scaling {
 
 coord_scaling!(Coordinates);
 coord_scaling!(CoordinateOffset);
+
+fn rotate_and_translate_coords(
+    coords: &mut Coordinates,
+    cx: f64,
+    cy: f64,
+    dx: f64,
+    dy: f64,
+    rotation_steps: i32,
+) {
+    let mut x = coords.x.map(f64::from).unwrap_or(0.0);
+    let mut y = coords.y.map(f64::from).unwrap_or(0.0);
+    if rotation_steps != 0 {
+        let (rx, ry) = crate::rotate_90(x - cx, y - cy, rotation_steps);
+        x = cx + rx;
+        y = cy + ry;
+    }
+    x += dx;
+    y += dy;
+    if let Some(ref mut xc) = coords.x {
+        if let Ok(v) = CoordinateNumber::try_from(x) {
+            *xc = v;
+        }
+    }
+    if let Some(ref mut yc) = coords.y {
+        if let Ok(v) = CoordinateNumber::try_from(y) {
+            *yc = v;
+        }
+    }
+}
+
+/// Rotate an arc's I/J center offset by `rot` CW quarter-turns. Writes both
+/// components even when one was None: a `J5` half-circle rotated 90° must
+/// land as `I5J0`, not silently drop the new I.
+fn rotate_arc_ij_offset(ij: &mut Option<CoordinateOffset>, rot: i32) {
+    if rot == 0 {
+        return;
+    }
+    let Some(off) = ij else {
+        return;
+    };
+    let i = off.x.map(f64::from).unwrap_or(0.0);
+    let j = off.y.map(f64::from).unwrap_or(0.0);
+    let (ri, rj) = crate::rotate_90(i, j, rot);
+    if let Ok(v) = CoordinateNumber::try_from(ri) {
+        off.x = Some(v);
+    }
+    if let Ok(v) = CoordinateNumber::try_from(rj) {
+        off.y = Some(v);
+    }
+}
+
+fn rotate_step_and_repeat(
+    distance_x: &mut f64,
+    distance_y: &mut f64,
+    repeat_x: &mut u32,
+    repeat_y: &mut u32,
+    rot: i32,
+) {
+    let (sx, sy) = crate::rotate_90(*distance_x, 0.0, rot);
+    let (tx, ty) = crate::rotate_90(0.0, *distance_y, rot);
+    if rot % 2 == 1 {
+        *distance_x = tx;
+        *distance_y = sy;
+        std::mem::swap(repeat_x, repeat_y);
+    } else {
+        *distance_x = sx;
+        *distance_y = ty;
+    }
+}
+
+fn rebase_gerber_commands(commands: &mut [Command], rot: i32, dx: f64, dy: f64) {
+    for cmd in commands.iter_mut() {
+        match cmd {
+            Command::FunctionCode(FunctionCode::DCode(DCode::Operation(
+                Operation::Move(Some(coords)) | Operation::Flash(Some(coords)),
+            ))) => {
+                rotate_and_translate_coords(coords, 0.0, 0.0, dx, dy, rot);
+            }
+            Command::FunctionCode(FunctionCode::DCode(DCode::Operation(
+                Operation::Interpolate(Some(coords), ij),
+            ))) => {
+                rotate_and_translate_coords(coords, 0.0, 0.0, dx, dy, rot);
+                rotate_arc_ij_offset(ij, rot);
+            }
+            Command::ExtendedCode(ExtendedCode::StepAndRepeat(StepAndRepeat::Open {
+                distance_x,
+                distance_y,
+                repeat_x,
+                repeat_y,
+            })) if rot != 0 => {
+                rotate_step_and_repeat(distance_x, distance_y, repeat_x, repeat_y, rot);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn rotate_gerber_apertures(apertures: &mut std::collections::HashMap<i32, Aperture>, rot: i32) {
+    if rot == 0 {
+        return;
+    }
+    let odd = rot % 2 == 1;
+    let degrees_ccw_delta = -90.0 * rot as f64;
+    let mut macros_skipped = 0usize;
+    for ap in apertures.values_mut() {
+        match ap {
+            Aperture::Circle(_) => {}
+            Aperture::Rectangle(r) | Aperture::Obround(r) => {
+                if odd {
+                    std::mem::swap(&mut r.x, &mut r.y);
+                }
+            }
+            Aperture::Polygon(p) => {
+                let cur = p.rotation.unwrap_or(0.0);
+                p.rotation = Some(cur + degrees_ccw_delta);
+            }
+            Aperture::Macro(_, _) => {
+                macros_skipped += 1;
+            }
+        }
+    }
+    if macros_skipped > 0 {
+        warn!(
+            "baking layer rotation: {macros_skipped} macro aperture(s) left un-rotated; \
+             their flashes may render incorrectly"
+        );
+    }
+}
+
+impl LayerRotate for GerberLayerData {
+    fn rotate(&mut self, steps: i32) {
+        let steps = steps.rem_euclid(4);
+        if steps == 0 {
+            return;
+        }
+        let (min, max) = self.get_corners();
+        let cx = (min.x + max.x) * 0.5;
+        let cy = (min.y + max.y) * 0.5;
+        let (rcx, rcy) = crate::rotate_90(cx, cy, steps);
+        self.rebase(steps, &Pos { x: cx - rcx, y: cy - rcy });
+    }
+
+    fn rebase(&mut self, steps: i32, offset: &Pos) {
+        let steps = steps.rem_euclid(4);
+        rebase_gerber_commands(&mut self.commands, steps, offset.x, offset.y);
+        rotate_gerber_apertures(&mut self.apertures, steps);
+    }
+}
 
 impl LayerStepAndRepeat for (&Unit, &mut Vec<Command>) {
     fn step_and_repeat(&mut self, x_repetitions: u32, y_repetitions: u32, offset: &Pos) {

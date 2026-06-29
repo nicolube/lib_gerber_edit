@@ -1,7 +1,7 @@
 use crate::excellon_format::ExcellonLayerData;
 use crate::gerber::GerberLayerData;
 use crate::layer::{Layer, LayerData, LayerType};
-use crate::{LayerCorners, LayerMerge, LayerTransform, Pos, error, excellon_format};
+use crate::{LayerCorners, LayerMerge, LayerRotate, LayerTransform, Pos, error, excellon_format};
 use gerber_parser::gerber_types::{Command, CommentContent, FunctionCode, GCode, GerberResult};
 use log::{debug, warn};
 use std::fs;
@@ -310,6 +310,26 @@ impl LayerTransform for Board {
     fn transform(&mut self, transform: &Pos) {
         for layer in &mut self.0 {
             layer.data.transform(transform);
+        }
+    }
+}
+
+impl LayerRotate for Board {
+    fn rotate(&mut self, steps: i32) {
+        let steps = steps.rem_euclid(4);
+        if steps == 0 {
+            return;
+        }
+        let (min, max) = self.get_corners();
+        let cx = (min.x + max.x) * 0.5;
+        let cy = (min.y + max.y) * 0.5;
+        let (rcx, rcy) = crate::rotate_90(cx, cy, steps);
+        self.rebase(steps, &Pos { x: cx - rcx, y: cy - rcy });
+    }
+
+    fn rebase(&mut self, steps: i32, offset: &Pos) {
+        for layer in &mut self.0 {
+            layer.data.rebase(steps, offset);
         }
     }
 }

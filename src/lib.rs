@@ -21,6 +21,7 @@
 //! | [`LayerCorners`] | Bounding box (`get_corners`) and size (`get_size`) |
 //! | [`LayerTransform`] | Translate by a [`Pos`] offset |
 //! | [`LayerScale`] | Scale by independent X/Y factors |
+//! | [`LayerRotate`] | Rotate by 90-degree steps about the centroid |
 //! | [`LayerMerge`] | Merge two layers or boards of the same type |
 //! | [`LayerStepAndRepeat`] | Tile a pattern across a grid |
 //!
@@ -123,6 +124,23 @@ pub trait LayerMerge: Sized {
     /// that can be converted into `Self` via [`Into`].
     fn merge_from(&mut self, other: impl Into<Self>) {
         self.merge(&other.into());
+    }
+}
+
+/// Rotation in 90-degree steps.
+pub trait LayerRotate {
+    /// Rotate by `steps` CW quarter-turns about the layer's own centroid.
+    fn rotate(&mut self, steps: i32);
+    /// Rotate by `steps` CW quarter-turns about the origin, then translate by `offset` (mm).
+    fn rebase(&mut self, steps: i32, offset: &Pos);
+}
+
+pub(crate) fn rotate_90(x: f64, y: f64, steps: i32) -> (f64, f64) {
+    match steps.rem_euclid(4) {
+        1 => (y, -x),
+        2 => (-x, -y),
+        3 => (-y, x),
+        _ => (x, y),
     }
 }
 

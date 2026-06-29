@@ -1,7 +1,7 @@
 use crate::error::ParseError;
 use crate::excellon_format::{ExcellonLayerData, parse_excellon};
 use crate::gerber::GerberLayerData;
-use crate::{LayerCorners, LayerMerge, LayerStepAndRepeat, LayerTransform, Pos};
+use crate::{LayerCorners, LayerMerge, LayerRotate, LayerStepAndRepeat, LayerTransform, Pos};
 use gerber_parser::gerber_types::{
     Command, CommentContent, ExtendedCode, ExtendedPosition, FileAttribute, FileFunction,
     FunctionCode, GCode, GerberResult, Position, Profile, StandardComment,
@@ -120,6 +120,24 @@ impl LayerTransform for LayerData {
         match self {
             LayerData::Excellon(s) => s.transform(transform),
             LayerData::Gerber(s) => s.transform(transform),
+            LayerData::Info(_) => {}
+        }
+    }
+}
+
+impl LayerRotate for LayerData {
+    fn rotate(&mut self, steps: i32) {
+        match self {
+            LayerData::Excellon(s) => s.rotate(steps),
+            LayerData::Gerber(s) => s.rotate(steps),
+            LayerData::Info(_) => {}
+        }
+    }
+
+    fn rebase(&mut self, steps: i32, offset: &Pos) {
+        match self {
+            LayerData::Excellon(s) => s.rebase(steps, offset),
+            LayerData::Gerber(s) => s.rebase(steps, offset),
             LayerData::Info(_) => {}
         }
     }

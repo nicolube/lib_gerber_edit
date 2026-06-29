@@ -1,6 +1,7 @@
 use crate::unit_able::UnitAble;
 use crate::{
-    LayerCorners, LayerData, LayerMerge, LayerScale, LayerStepAndRepeat, LayerTransform, Pos,
+    LayerCorners, LayerData, LayerMerge, LayerRotate, LayerScale, LayerStepAndRepeat,
+    LayerTransform, Pos,
 };
 use derive_more::{Display, Error};
 use gerber_parser::gerber_types::Unit;
@@ -108,6 +109,51 @@ impl LayerTransform for ExcellonLayerData {
             }
             _ => {}
         })
+    }
+}
+
+fn rotate_excellon_coordinates(e: &mut ExcellonLayerData, rot: i32) {
+    let rot_pair = |x: &mut Option<f64>, y: &mut Option<f64>| {
+        let (rx, ry) = crate::rotate_90(x.unwrap_or(0.0), y.unwrap_or(0.0), rot);
+        if x.is_some() { *x = Some(rx); }
+        if y.is_some() { *y = Some(ry); }
+    };
+    for cmd in e
+        .header
+        .iter_mut()
+        .chain(e.commands.iter_mut())
+        .filter_map(|c| c.as_mut().ok())
+    {
+        match cmd {
+            Command::Coordinate(x, y, _) => rot_pair(x, y),
+            Command::Slot { from_x, from_y, to_x, to_y, .. } => {
+                rot_pair(from_x, from_y);
+                rot_pair(to_x, to_y);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl LayerRotate for ExcellonLayerData {
+    fn rotate(&mut self, steps: i32) {
+        let steps = steps.rem_euclid(4);
+        if steps == 0 {
+            return;
+        }
+        let (min, max) = self.get_corners();
+        let cx = (min.x + max.x) * 0.5;
+        let cy = (min.y + max.y) * 0.5;
+        let (rcx, rcy) = crate::rotate_90(cx, cy, steps);
+        self.rebase(steps, &Pos { x: cx - rcx, y: cy - rcy });
+    }
+
+    fn rebase(&mut self, steps: i32, offset: &Pos) {
+        let steps = steps.rem_euclid(4);
+        if steps != 0 {
+            rotate_excellon_coordinates(self, steps);
+        }
+        self.transform(offset);
     }
 }
 
