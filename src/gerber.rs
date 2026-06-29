@@ -75,7 +75,12 @@ impl GerberLayerData {
                     cmd,
                     Command::FunctionCode(
                         FunctionCode::DCode(_) | FunctionCode::GCode(GCode::RegionMode(_))
-                    ) | Command::ExtendedCode(ExtendedCode::StepAndRepeat(_))
+                    ) | Command::ExtendedCode(
+                        ExtendedCode::StepAndRepeat(_)
+                            | ExtendedCode::ApertureAttribute(_)
+                            | ExtendedCode::ObjectAttribute(_)
+                            | ExtendedCode::DeleteAttribute(_)
+                    )
                 )
             })
             .filter(|cmd| {
