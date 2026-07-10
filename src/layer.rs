@@ -224,7 +224,7 @@ impl TryFrom<&str> for LayerType {
             "GVC" => Ok(LayerType::VCut),
             "GSP" => Ok(LayerType::SidePlating),
             "GKO" => Ok(LayerType::KeepOut),
-            "GBR" => Ok(LayerType::UndefinedGerber),
+            "GBR" | "GBX" | "ART" => Ok(LayerType::UndefinedGerber),
             _ if value.starts_with("GL") => {
                 let inner_num = value[2..]
                     .parse::<i32>()
@@ -309,7 +309,6 @@ impl LayerType {
             FileFunction::Profile(_) => LayerType::Dimensions,
             FileFunction::VCut(_) => LayerType::VCut,
             FileFunction::KeepOut(_) => LayerType::KeepOut,
-            FileFunction::Other(_) => LayerType::Info,
             _ => LayerType::UndefinedGerber,
         }
     }
