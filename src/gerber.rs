@@ -80,6 +80,7 @@ impl GerberLayerData {
                             | ExtendedCode::ApertureAttribute(_)
                             | ExtendedCode::ObjectAttribute(_)
                             | ExtendedCode::DeleteAttribute(_)
+                            | ExtendedCode::LoadPolarity(_)
                     )
                 )
             })
