@@ -70,24 +70,28 @@ impl GerberLayerData {
 
         let commands: Vec<Command> = all_commands
             .into_iter()
-            .skip_while(|cmd| {
-                !matches!(
-                    cmd,
-                    Command::FunctionCode(
-                        FunctionCode::DCode(_) | FunctionCode::GCode(GCode::RegionMode(_))
-                    ) | Command::ExtendedCode(
-                        ExtendedCode::StepAndRepeat(_)
-                            | ExtendedCode::ApertureAttribute(_)
-                            | ExtendedCode::ObjectAttribute(_)
-                            | ExtendedCode::DeleteAttribute(_)
-                            | ExtendedCode::LoadPolarity(_)
-                    )
-                )
-            })
             .filter(|cmd| {
                 !matches!(
                     cmd,
-                    Command::FunctionCode(FunctionCode::MCode(MCode::EndOfFile))
+                    Command::ExtendedCode(
+                        ExtendedCode::ApertureMacro(_)
+                            | ExtendedCode::ApertureDefinition(_)
+                            | ExtendedCode::ImageName(_)
+                            | ExtendedCode::ScaleImage(_)
+                            | ExtendedCode::Unit(_)
+                            | ExtendedCode::CoordinateFormat(_)
+                            | ExtendedCode::FileAttribute(_)
+                            | ExtendedCode::OffsetImage(_)
+                            | ExtendedCode::RotateImage(_)
+                            | ExtendedCode::ImagePolarity(_)
+                            | ExtendedCode::AxisSelect(_)
+                    ) | Command::FunctionCode(FunctionCode::MCode(MCode::EndOfFile))
+                )
+            })
+            .skip_while(|cmd| {
+                matches!(
+                    cmd,
+                    Command::FunctionCode(FunctionCode::GCode(GCode::Comment(_)))
                 )
             })
             .collect();
