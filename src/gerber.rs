@@ -5,6 +5,7 @@ use crate::{
     LayerCorners, LayerData, LayerMerge, LayerRotate, LayerScale, LayerStepAndRepeat,
     LayerTransform, LayerType, Pos,
 };
+use chrono::Utc;
 use gerber_parser::GerberDoc;
 use gerber_parser::gerber_types::{
     Aperture, ApertureDefinition, ApertureMacro, Command, CommentContent, CoordinateFormat,
@@ -15,7 +16,6 @@ use gerber_parser::gerber_types::{
 use log::{debug, warn};
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Read, Write};
-use chrono::Utc;
 
 /// A parsed RS-274X (Extended Gerber) layer, split into its logical components.
 ///
@@ -86,7 +86,12 @@ impl GerberLayerData {
                         | ExtendedCode::ImageName(_)
                         | ExtendedCode::Unit(_)
                         | ExtendedCode::CoordinateFormat(_)
-                ) | Command::FunctionCode(FunctionCode::MCode(MCode::EndOfFile))
+                ) | Command::FunctionCode(
+                    FunctionCode::MCode(MCode::EndOfFile)
+                        | FunctionCode::GCode(GCode::Comment(CommentContent::Standard(
+                            StandardComment::FileAttribute(FileAttribute::FileFunction(_))
+                        )))
+                )
             );
             if is_regenerated {
                 continue;
@@ -232,19 +237,18 @@ impl GerberLayerData {
     /// aperture definitions, aperture macros) and appends `M02*` (end of file).
     /// The draw commands are passed through the [`Optimize`] filter before output.
     fn to_commands(&self) -> Vec<Command> {
-        let mut commands = self.header.clone();
-        commands.extend(
-            [
-                FileAttribute::FileFunction(self.layer_type.function()),
-                FileAttribute::CreationDate(GerberDate::from(Utc::now())),
-            ]
-            .into_iter()
-            .map(|fa| {
-                Command::FunctionCode(FunctionCode::GCode(GCode::Comment(
-                    CommentContent::Standard(StandardComment::FileAttribute(fa)),
-                )))
-            }),
-        );
+        let mut commands: Vec<_> = [
+            FileAttribute::FileFunction(self.layer_type.function()),
+            FileAttribute::CreationDate(GerberDate::from(Utc::now())),
+        ]
+        .into_iter()
+        .map(|fa| {
+            Command::FunctionCode(FunctionCode::GCode(GCode::Comment(
+                CommentContent::Standard(StandardComment::FileAttribute(fa)),
+            )))
+        })
+        .collect();
+        commands.extend(self.header.clone());
         commands.extend([
             Command::FunctionCode(FunctionCode::GCode(GCode::QuadrantMode(
                 QuadrantMode::Multi,
