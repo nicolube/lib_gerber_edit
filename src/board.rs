@@ -41,16 +41,17 @@ pub struct Board(Vec<Layer>);
 impl Board {
     /// Parses a board from a list of `(filename, reader)` pairs.
     ///
-    /// The layer type is inferred from the file extension (e.g. `.gtl` → `Top`).
-    /// For `.gbr` files the type is read from the `FileAttribute` embedded in
-    /// the Gerber data. Files with unrecognised extensions or parse failures are
+    /// The layer type is inferred from the file name (see
+    /// [`LayerType::from_file_name`]): the extension (e.g. `.gtl` → `Top`), or
+    /// for `.gbr` files the KiCad layer name (e.g. `-F_Courtyard.gbr`). A
+    /// specific X2 `FileFunction` embedded in the Gerber data takes precedence. Files with unrecognised extensions or parse failures are
     /// collected in [`LoadResult::errors`] so the caller can inspect them without
     /// losing the layers that did load correctly.
     pub fn load(data: Vec<(&str, BufReader<&mut dyn Read>)>) -> LoadResult {
         let mut board = Self::empty();
         let mut errors: Vec<(String, error::Error)> = Vec::new();
         for (name, reader) in data {
-            let ty = LayerType::try_from(name.rsplit('.').next().unwrap_or_default());
+            let ty = LayerType::from_file_name(name);
             match ty {
                 Ok(ty) => {
                     debug!("Parsing layer '{}' as {:?}", name, ty);
@@ -121,8 +122,7 @@ impl Board {
                 if !matches!(entry.file_type(), Ok(ft) if ft.is_file()) {
                     return None;
                 }
-                let ext = name.rsplit('.').next().unwrap_or_default();
-                match LayerType::try_from(ext) {
+                match LayerType::from_file_name(&name) {
                     Ok(ty) => Some((name, ty, entry.path())),
                     Err(_) => {
                         debug!("Skipping unrecognised file: {}", name);
@@ -270,8 +270,8 @@ impl LayerCorners for Board {
     /// Returns the bounding box of the board.
     ///
     /// Computed as the union of all layer corners (Gerber and Excellon drill),
-    /// excluding `KeepOut`, `Info`, and `SidePlating` layers as they don't
-    /// represent physical board area.
+    /// excluding `KeepOut`, `Info`, `SidePlating` and courtyard layers as they
+    /// don't represent physical board area.
     fn get_corners(&self) -> (Pos, Pos) {
         let mut min = Pos {
             x: f64::MAX,
@@ -282,8 +282,14 @@ impl LayerCorners for Board {
             y: f64::MIN,
         };
         for layer in self.0.iter() {
-            if [LayerType::KeepOut, LayerType::Info, LayerType::SidePlating].contains(&layer.ty)
-                || matches!(layer.data, LayerData::Info(_))
+            if matches!(
+                layer.ty,
+                LayerType::KeepOut
+                    | LayerType::Info
+                    | LayerType::SidePlating
+                    | LayerType::CourtyardTop
+                    | LayerType::CourtyardBottom
+            ) || matches!(layer.data, LayerData::Info(_))
             {
                 continue;
             }

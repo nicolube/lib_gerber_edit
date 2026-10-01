@@ -179,7 +179,7 @@ macro_rules! load_layer_data {
     ($file:expr $(,)?) => {{
         let data = include_str!($file);
         let reader = std::io::BufReader::new(std::io::Cursor::new(data));
-        let ty = LayerType::try_from($file.to_string().rsplitn(2, ".").next().unwrap()).unwrap();
+        let ty = LayerType::from_file_name($file).unwrap();
         LayerData::parse(ty, reader).unwrap()
     }};
 }

@@ -69,7 +69,7 @@ impl LayerData {
             }
         }
         let gerber = GerberLayerData::from_type(ty, BufReader::new(Cursor::new(buf)))?;
-        Ok((ty, LayerData::Gerber(gerber)))
+        Ok((gerber.layer_type, LayerData::Gerber(gerber)))
     }
 
     pub fn write_to<T>(&self, writer: &mut BufWriter<T>) -> GerberResult<()>
@@ -201,6 +201,8 @@ pub enum LayerType {
     VCut,
     SidePlating,
     KeepOut,
+    CourtyardTop,
+    CourtyardBottom,
     Info,
     UndefinedGerber,
 }
@@ -225,18 +227,83 @@ impl TryFrom<&str> for LayerType {
             "GSP" => Ok(LayerType::SidePlating),
             "GKO" => Ok(LayerType::KeepOut),
             "GBR" | "GBX" | "ART" => Ok(LayerType::UndefinedGerber),
-            _ if value.starts_with("GL") => {
-                let inner_num = value[2..]
-                    .parse::<i32>()
-                    .map_err(|_| "GL must be followed by numbers")?;
-                Ok(LayerType::Inner(inner_num))
+            upper => {
+                if let Some(num) = upper.strip_prefix("GL") {
+                    let inner_num = num
+                        .parse::<i32>()
+                        .map_err(|_| "GL must be followed by numbers")?;
+                    Ok(LayerType::Inner(inner_num))
+                } else if let Some(Ok(ordinal)) = upper.strip_prefix('G').map(str::parse::<u16>) {
+                    // KiCad's Protel-style inner copper extension: `.g1` is In1_Cu.
+                    Ok(kicad_inner(ordinal.into()))
+                } else {
+                    Err(format!("Invalid layer type: {}", value))
+                }
             }
-            _ => Err(format!("Invalid layer type: {}", value)),
         }
     }
 }
 
+// The Gerber spec has no courtyard file function, so courtyards are written
+// as `Other,<value>` with these values and recognised again on load.
+const COURTYARD_TOP: &str = "Courtyard_Top";
+const COURTYARD_BOTTOM: &str = "Courtyard_Bot";
+
+/// KiCad's inner copper `In<n>_Cu` is copper layer `L<n+1>` in its X2
+/// attributes, which is what [`LayerType::Inner`] numbers.
+fn kicad_inner(ordinal: i32) -> LayerType {
+    LayerType::Inner(ordinal + 1)
+}
+
 impl LayerType {
+    /// Infers the layer type from a file name.
+    ///
+    /// The extension is tried first (see [`TryFrom<&str>`]). For generic
+    /// Gerber extensions (`.gbr`, …) the KiCad layer name suffix is used when
+    /// present (e.g. `board-F_Courtyard.gbr` → `CourtyardTop`), since KiCad
+    /// marks some layers, like courtyards, only as `Other,User` in X2.
+    pub fn from_file_name(name: &str) -> Result<Self, String> {
+        let (stem, ext) = name.rsplit_once('.').unwrap_or((name, name));
+        let ty = LayerType::try_from(ext)?;
+        if ty != LayerType::UndefinedGerber {
+            return Ok(ty);
+        }
+        Ok(Self::from_kicad_layer_name(stem).unwrap_or(ty))
+    }
+
+    /// Maps the KiCad layer name at the end of a plot file stem
+    /// (`<project>-<layer>`) to a layer type. Both KiCad 5 (`F_SilkS`,
+    /// `F_CrtYd`) and KiCad 6+ (`F_Silkscreen`, `F_Courtyard`) names are
+    /// recognised, as is a user layer named `V-Cut`.
+    fn from_kicad_layer_name(stem: &str) -> Option<Self> {
+        let upper = stem.to_ascii_uppercase();
+        // Checked before splitting on `-`, since the name itself contains one.
+        if upper == "V-CUT" || upper.ends_with("-V-CUT") {
+            return Some(LayerType::VCut);
+        }
+        let layer = upper.rsplit('-').next()?;
+        let ty = match layer {
+            "F_CU" => LayerType::Top,
+            "B_CU" => LayerType::Bottom,
+            "F_MASK" => LayerType::MaskTop,
+            "B_MASK" => LayerType::MaskBottom,
+            "F_PASTE" => LayerType::PasteTop,
+            "B_PASTE" => LayerType::PasteBottom,
+            "F_SILKSCREEN" | "F_SILKS" => LayerType::SilkScreenTop,
+            "B_SILKSCREEN" | "B_SILKS" => LayerType::SilkScreenBottom,
+            // KiCad tags Edge_Cuts as `Profile,NP`, which maps to `Milling`.
+            "EDGE_CUTS" => LayerType::Milling,
+            "F_COURTYARD" | "F_CRTYD" => LayerType::CourtyardTop,
+            "B_COURTYARD" | "B_CRTYD" => LayerType::CourtyardBottom,
+            "V_CUT" | "VCUT" => LayerType::VCut,
+            inner => {
+                let num = inner.strip_prefix("IN")?.strip_suffix("_CU")?;
+                kicad_inner(num.parse().ok()?)
+            }
+        };
+        Some(ty)
+    }
+
     /// Searches for a matching FileAttribute in a set of commands
     pub fn from_commands<'a, I: IntoIterator<Item = &'a Command>>(value: I) -> Option<Self> {
         let mut iter = value.into_iter();
@@ -309,6 +376,12 @@ impl LayerType {
             FileFunction::Profile(_) => LayerType::Dimensions,
             FileFunction::VCut(_) => LayerType::VCut,
             FileFunction::KeepOut(_) => LayerType::KeepOut,
+            FileFunction::Other(value) if value.eq_ignore_ascii_case(COURTYARD_TOP) => {
+                LayerType::CourtyardTop
+            }
+            FileFunction::Other(value) if value.eq_ignore_ascii_case(COURTYARD_BOTTOM) => {
+                LayerType::CourtyardBottom
+            }
             _ => LayerType::UndefinedGerber,
         }
     }
@@ -355,6 +428,8 @@ impl LayerType {
             LayerType::VCut => FileFunction::VCut(None),
             LayerType::SidePlating => FileFunction::Profile(Some(Profile::Plated)),
             LayerType::KeepOut => FileFunction::KeepOut(Position::Top),
+            LayerType::CourtyardTop => FileFunction::Other(String::from(COURTYARD_TOP)),
+            LayerType::CourtyardBottom => FileFunction::Other(String::from(COURTYARD_BOTTOM)),
             LayerType::Info => FileFunction::Other(String::from("Text")),
             LayerType::UndefinedGerber => FileFunction::Other(String::from("Undefined")),
         }
@@ -380,6 +455,8 @@ impl Display for LayerType {
             LayerType::VCut => write!(f, "V-Cut Layer")?,
             LayerType::SidePlating => write!(f, "Side Plating Layer")?,
             LayerType::KeepOut => write!(f, "Keep Out Layer")?,
+            LayerType::CourtyardTop => write!(f, "Courtyard Top Layer")?,
+            LayerType::CourtyardBottom => write!(f, "Courtyard Bottom Layer")?,
             LayerType::Info => write!(f, "Info")?,
             LayerType::UndefinedGerber => write!(f, "Undefined")?,
         };
@@ -459,6 +536,75 @@ mod serde {
             str.serialize_field("file_type", &self.ty.file_ending())?;
             str.serialize_field("data", &self.data)?;
             str.end()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kicad_file_names() {
+        let cases = [
+            ("mobo-F_Cu.gbr", LayerType::Top),
+            ("mobo-B_Cu.gbr", LayerType::Bottom),
+            ("mobo-In1_Cu.gbr", LayerType::Inner(2)),
+            ("my-board-In2_Cu.gbr", LayerType::Inner(3)),
+            ("mobo-F_Mask.gbr", LayerType::MaskTop),
+            ("mobo-B_Paste.gbr", LayerType::PasteBottom),
+            ("mobo-F_Silkscreen.gbr", LayerType::SilkScreenTop),
+            ("mobo-B_SilkS.gbr", LayerType::SilkScreenBottom),
+            ("mobo-Edge_Cuts.gbr", LayerType::Milling),
+            ("mobo-F_Courtyard.gbr", LayerType::CourtyardTop),
+            ("mobo-B_CrtYd.gbr", LayerType::CourtyardBottom),
+            ("mobo-User_1.gbr", LayerType::UndefinedGerber),
+            ("mobo-V-Cut.gbr", LayerType::VCut),
+            ("my-board-V_Cut.gbr", LayerType::VCut),
+            ("V-Cut.gbr", LayerType::VCut),
+            ("mobo-NoV-Cut.gbr", LayerType::UndefinedGerber),
+            ("mobo.g1", LayerType::Inner(2)),
+            ("mobo.G2", LayerType::Inner(3)),
+            ("mobo.gl2", LayerType::Inner(2)),
+            ("mobo.gtl", LayerType::Top),
+        ];
+        for (name, ty) in cases {
+            assert_eq!(LayerType::from_file_name(name), Ok(ty), "{name}");
+        }
+        assert!(LayerType::from_file_name("mobo-job.gbrjob").is_err());
+        assert!(LayerType::from_file_name("mobo.x1").is_err());
+    }
+
+    #[test]
+    fn courtyard_function_round_trip() {
+        for ty in [LayerType::CourtyardTop, LayerType::CourtyardBottom] {
+            assert_eq!(LayerType::layer_type(&ty.function()), ty);
+        }
+    }
+
+    #[test]
+    fn kicad_other_user_keeps_file_name_type() {
+        let gbr = "%TF.FileFunction,Other,User*%\n%FSLAX46Y46*%\n%MOMM*%\nM02*\n";
+        let mut reader: &[u8] = gbr.as_bytes();
+        let result = crate::board::Board::load(vec![(
+            "mobo-F_Courtyard.gbr",
+            BufReader::new(&mut reader as &mut dyn Read),
+        )]);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.board.layers()[0].ty, LayerType::CourtyardTop);
+    }
+
+    #[test]
+    fn kicad_folder() {
+        let result = crate::board::Board::from_folder(std::path::Path::new("test/mobo")).unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        for layer in result.board.layers() {
+            assert_eq!(
+                Ok(layer.ty),
+                LayerType::from_file_name(&layer.name),
+                "{}",
+                layer.name
+            );
         }
     }
 }

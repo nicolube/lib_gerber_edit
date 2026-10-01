@@ -121,7 +121,11 @@ impl GerberLayerData {
             }
         }
 
-        let ty = LayerType::from_commands(&commands).unwrap_or(ty);
+        // The X2 file function wins unless it is unspecific (e.g. KiCad's
+        // `Other,User` courtyards), in which case the caller's type is kept.
+        let ty = LayerType::from_commands(&commands)
+            .filter(|t| *t != LayerType::UndefinedGerber)
+            .unwrap_or(ty);
 
         let coordinate_format =
             format_specification.ok_or(ParseError::FormatMissing(ty.to_string()))?;
@@ -153,13 +157,7 @@ impl GerberLayerData {
     where
         R: Read,
     {
-        debug!("Parsing Gerber layer, detecting type from FileAttribute");
-        let data = gerber_parser::parse(reader).map_err(|(_, err)| err)?;
-
-        let layer_type =
-            LayerType::from_commands(data.commands()).unwrap_or(LayerType::UndefinedGerber);
-
-        Self::new(layer_type, data)
+        Self::from_type(LayerType::UndefinedGerber, reader)
     }
 
     /// Creates an empty gerber layer
