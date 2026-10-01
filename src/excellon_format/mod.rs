@@ -505,10 +505,10 @@ impl Display for Command {
             Command::Machine(code) => writeln!(f, "{}", code),
             Command::Coordinate(x, y, fmt) => {
                 if let Some(x) = x {
-                    write!(f, "X{}", &fmt.serialize(*x))?
+                    write!(f, "X{}", fmt.serialize(*x))?
                 };
                 if let Some(y) = y {
-                    write!(f, "Y{}", &fmt.serialize(*y))?
+                    write!(f, "Y{}", fmt.serialize(*y))?
                 };
                 if x.is_some() || y.is_some() {
                     writeln!(f)?;
@@ -516,7 +516,7 @@ impl Display for Command {
                 Ok(())
             }
             Command::Tool(id) => writeln!(f, "T{}", id),
-            Command::ToolDefinition(td) => writeln!(f, "T{}C{:0.3}", &td.tool_number, &td.diameter),
+            Command::ToolDefinition(td) => writeln!(f, "T{}C{:0.3}", td.tool_number, td.diameter),
             Command::Comment(c) => writeln!(f, ";{}", c),
             Command::FeedRate(rate) => writeln!(f, "F{}", rate),
             Command::Slot {
@@ -527,17 +527,17 @@ impl Display for Command {
                 fmt,
             } => {
                 if let Some(x) = from_x {
-                    write!(f, "X{}", &fmt.serialize(*x))?
+                    write!(f, "X{}", fmt.serialize(*x))?
                 };
                 if let Some(y) = from_y {
-                    write!(f, "Y{}", &fmt.serialize(*y))?
+                    write!(f, "Y{}", fmt.serialize(*y))?
                 };
                 write!(f, "G85")?;
                 if let Some(x) = to_x {
-                    write!(f, "X{}", &fmt.serialize(*x))?
+                    write!(f, "X{}", fmt.serialize(*x))?
                 };
                 if let Some(y) = to_y {
-                    write!(f, "Y{}", &fmt.serialize(*y))?
+                    write!(f, "Y{}", fmt.serialize(*y))?
                 };
                 writeln!(f)
             }
