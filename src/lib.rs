@@ -64,6 +64,7 @@
 pub mod board;
 pub mod error;
 pub mod excellon_format;
+pub mod flatten;
 pub mod gerber;
 pub mod gerber_ascii;
 pub mod layer;

@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `flatten` module: `aperture_shapes` turns any aperture into polygons in mm,
+  including holes and aperture macros (expressions, variables, all
+  primitives, exposure off, rotation). Errors come back as `MacroError`.
+
 ## [0.6.1] - 2026-10-03
 
 ### Added
