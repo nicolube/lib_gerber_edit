@@ -76,7 +76,7 @@ impl ExcellonLayerData {
         !self.commands.iter().any(|x| {
             matches!(
                 x,
-                Ok(Command::Coordinate(_, _, _)) | Ok(Command::Slot { .. })
+                Ok(Command::Coordinate(..)) | Ok(Command::Slot { .. }) | Ok(Command::Arc { .. })
             )
         })
     }
@@ -109,6 +109,11 @@ impl LayerTransform for ExcellonLayerData {
                     shift(to_x, transform.x, &fmt.unit);
                     shift(from_y, transform.y, &fmt.unit);
                     shift(to_y, transform.y, &fmt.unit);
+                }
+                // Centre offsets and radii are relative, so only the end moves.
+                Command::Arc { x, y, fmt, .. } => {
+                    shift(x, transform.x, &fmt.unit);
+                    shift(y, transform.y, &fmt.unit);
                 }
                 _ => {}
             }
@@ -167,6 +172,7 @@ fn resolve_absolute_coordinates(
                 resolve(from_x, from_y, &fmt.unit, incremental);
                 resolve(to_x, to_y, &fmt.unit, incremental);
             }
+            Command::Arc { x, y, fmt, .. } => resolve(x, y, &fmt.unit, incremental),
             _ => {}
         }
     }
@@ -201,6 +207,14 @@ fn rotate_excellon_coordinates(e: &mut ExcellonLayerData, rot: i32) {
             } => {
                 rot_point(from_x, from_y);
                 rot_point(to_x, to_y);
+            }
+            Command::Arc { x, y, center, .. } => {
+                rot_point(x, y);
+                // A quarter turn keeps the arc direction; only the centre
+                // offset vector turns with the points.
+                if let ArcCenter::Offset { i, j } = center {
+                    (*i, *j) = crate::rotate_90(*i, *j, rot);
+                }
             }
             _ => {}
         }
@@ -269,7 +283,7 @@ impl LayerMerge for ExcellonLayerData {
             _ => None,
         });
         let mut last_mode = self.commands.iter().rev().find_map(|x| match x {
-            Ok(Command::Geometric(GeometricCode::Mode(m))) => Some(m.clone()),
+            Ok(Command::Geometric(GeometricCode::Mode(m))) => Some(*m),
             _ => None,
         });
         let mut last_input_mode = self
@@ -300,7 +314,7 @@ impl LayerMerge for ExcellonLayerData {
                     fmt.leading = self.unit.leading;
                     fmt.trailing = self.unit.trailing;
                 }
-                Ok(Command::Slot { fmt, .. }) => {
+                Ok(Command::Slot { fmt, .. }) | Ok(Command::Arc { fmt, .. }) => {
                     fmt.leading = self.unit.leading;
                     fmt.trailing = self.unit.trailing;
                 }
@@ -321,7 +335,7 @@ impl LayerMerge for ExcellonLayerData {
                 }
                 Ok(Command::Geometric(GeometricCode::Mode(m))) => {
                     if Some(&*m) != last_mode.as_ref() {
-                        last_mode = Some(m.clone());
+                        last_mode = Some(*m);
                     } else {
                         continue;
                     }
@@ -385,6 +399,24 @@ impl LayerScale for ExcellonLayerData {
                     mul(from_y, y);
                     mul(to_y, y);
                 }
+                Command::Arc {
+                    x: ax,
+                    y: ay,
+                    center,
+                    ..
+                } => {
+                    mul(ax, x);
+                    mul(ay, y);
+                    // Exact only for uniform scaling; an ellipse cannot be
+                    // expressed as a circular arc.
+                    match center {
+                        ArcCenter::Radius(r) => *r *= x.abs().max(y.abs()),
+                        ArcCenter::Offset { i, j } => {
+                            *i *= x;
+                            *j *= y;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -405,6 +437,14 @@ impl LayerCorners for ExcellonLayerData {
         let mut radius = 0.0;
         // Coordinates are absolute after load (see `resolve_absolute_coordinates`).
         let mut current = Pos::default();
+        let mut mode = Mode::DrillMode;
+        // Widens the box by `lo..hi` padded with the tool radius.
+        fn grow(min: &mut Pos, max: &mut Pos, lo: [f64; 2], hi: [f64; 2], pad: f64) {
+            min.x = min.x.min(lo[0] - pad);
+            min.y = min.y.min(lo[1] - pad);
+            max.x = max.x.max(hi[0] + pad);
+            max.y = max.y.max(hi[1] + pad);
+        }
 
         for command in self.commands.iter().flatten() {
             match command {
@@ -415,12 +455,22 @@ impl LayerCorners for ExcellonLayerData {
                         .map(|d| d.to_mm(&self.unit.unit) / 2.0)
                         .unwrap_or(0.0);
                 }
-                Command::Coordinate(x, y, fmt) => {
+                Command::Geometric(GeometricCode::Mode(m)) => mode = *m,
+                Command::Arc { x, y, center, fmt }
+                    if matches!(mode, Mode::CircularCW | Mode::CircularCWW) =>
+                {
+                    let start = [current.x, current.y];
                     current = resolve_point(*x, *y, &fmt.unit, &current);
-                    min.x = min.x.min(current.x - radius);
-                    min.y = min.y.min(current.y - radius);
-                    max.x = max.x.max(current.x + radius);
-                    max.y = max.y.max(current.y + radius);
+                    let end = [current.x, current.y];
+                    let ccw = mode == Mode::CircularCWW;
+                    let c = center.center_mm(start, end, &fmt.unit, ccw);
+                    let (lo, hi) = crate::flatten::geom::arc_bounds(start, end, c, ccw);
+                    grow(&mut min, &mut max, lo, hi, radius);
+                }
+                Command::Coordinate(x, y, fmt) | Command::Arc { x, y, fmt, .. } => {
+                    current = resolve_point(*x, *y, &fmt.unit, &current);
+                    let p = [current.x, current.y];
+                    grow(&mut min, &mut max, p, p, radius);
                 }
                 Command::Slot {
                     from_x,
@@ -432,11 +482,8 @@ impl LayerCorners for ExcellonLayerData {
                     // Both endpoints bound the milled slot; tool width expands it.
                     let from = resolve_point(*from_x, *from_y, &fmt.unit, &current);
                     current = resolve_point(*to_x, *to_y, &fmt.unit, &from);
-                    for p in [&from, &current] {
-                        min.x = min.x.min(p.x - radius);
-                        min.y = min.y.min(p.y - radius);
-                        max.x = max.x.max(p.x + radius);
-                        max.y = max.y.max(p.y + radius);
+                    for p in [[from.x, from.y], [current.x, current.y]] {
+                        grow(&mut min, &mut max, p, p, radius);
                     }
                 }
                 _ => {}
@@ -448,6 +495,7 @@ impl LayerCorners for ExcellonLayerData {
 
 /// Structured error type for individual Excellon parse failures.
 #[derive(Debug, Clone, PartialEq, Error, Display)]
+#[non_exhaustive]
 pub enum ExcellonError {
     #[display("Invalid CIC format: {}", _0)]
     InvalidCicOption(#[error(not(source))] String),
@@ -510,6 +558,7 @@ pub struct ExcellonParseFormat {
 
 /// A single parsed Excellon command.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Command {
     /// `FMAT,<version>` — file format version declaration.
     FormatCode(u8),
@@ -539,6 +588,38 @@ pub enum Command {
         to_y: Option<f64>,
         fmt: UnitDefinition,
     },
+    /// `X<n>Y<n>A<r>` / `X<n>Y<n>I<n>J<n>` — a circular route to `(x, y)`;
+    /// the direction comes from the active `G02`/`G03` mode.
+    Arc {
+        x: Option<f64>,
+        y: Option<f64>,
+        center: ArcCenter,
+        fmt: UnitDefinition,
+    },
+}
+
+/// How a circular route gives its centre, in the coordinate's unit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum ArcCenter {
+    /// `A<r>`: the arc of radius `r` up to 180°; a negative radius selects
+    /// the arc over 180°.
+    Radius(f64),
+    /// `I<i>J<j>`: centre offset from the arc start.
+    Offset { i: f64, j: f64 },
+}
+
+impl ArcCenter {
+    /// Centre in mm of the arc from `start` to `end` (both mm); `unit` is the
+    /// unit the radius or offsets are written in.
+    pub fn center_mm(&self, start: [f64; 2], end: [f64; 2], unit: &Unit, ccw: bool) -> [f64; 2] {
+        match *self {
+            ArcCenter::Radius(r) => {
+                crate::flatten::geom::arc_center_from_radius(start, end, r.to_mm(unit), ccw)
+            }
+            ArcCenter::Offset { i, j } => [start[0] + i.to_mm(unit), start[1] + j.to_mm(unit)],
+        }
+    }
 }
 
 impl Display for Command {
@@ -586,6 +667,21 @@ impl Display for Command {
                 if let Some(y) = to_y {
                     write!(f, "Y{}", fmt.serialize(*y))?
                 };
+                writeln!(f)
+            }
+            Command::Arc { x, y, center, fmt } => {
+                if let Some(x) = x {
+                    write!(f, "X{}", fmt.serialize(*x))?
+                };
+                if let Some(y) = y {
+                    write!(f, "Y{}", fmt.serialize(*y))?
+                };
+                match center {
+                    ArcCenter::Radius(r) => write!(f, "A{}", fmt.serialize(*r))?,
+                    ArcCenter::Offset { i, j } => {
+                        write!(f, "I{}J{}", fmt.serialize(*i), fmt.serialize(*j))?
+                    }
+                }
                 writeln!(f)
             }
         }
@@ -738,7 +834,7 @@ pub enum InputMode {
     Incremental,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Display)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Display)]
 pub enum Mode {
     #[display("G00")]
     Route,
@@ -789,6 +885,7 @@ impl Display for MachineCode {
 enum LineResult {
     Command(Command),
     RawCoordinate(Option<f64>, Option<f64>),
+    RawArc(Option<f64>, Option<f64>, ArcCenter),
     /// `R<n>X<dx>Y<dy>`: repeat the last hit `n` times, each offset by `(dx, dy)`.
     Repeat(u32, Option<f64>, Option<f64>),
 }
@@ -952,9 +1049,38 @@ fn parse_xy(
     }
 }
 
+// Parse a coordinate line, which in circular mode may carry `A<r>` or
+// `I<i>J<j>` after the end point.
 fn parse_coord(line: &str, fmt: &UnitDefinition) -> Result<LineResult, ExcellonError> {
-    let (x, y) = parse_xy(line, fmt)?;
-    Ok(LineResult::RawCoordinate(x, y))
+    let Some(at) = line.find(['A', 'I', 'J']) else {
+        let (x, y) = parse_xy(line, fmt)?;
+        return Ok(LineResult::RawCoordinate(x, y));
+    };
+    let (x, y) = parse_xy(&line[..at], fmt)?;
+    fn inner<'i>(input: &mut &'i str) -> ModalResult<(char, &'i str, Option<&'i str>)> {
+        let val = |i: &mut &'i str| (opt('-'), digit1, opt(('.', digit1))).take().parse_next(i);
+        alt((
+            ('A', val, winnow::combinator::empty.value(None)),
+            ('I', val, opt(preceded('J', val))),
+            ('J', val, winnow::combinator::empty.value(None)),
+        ))
+        .parse_next(input)
+    }
+    let invalid = || ExcellonError::InvalidCoordinate(line.to_string());
+    let (kind, first, second) = inner.parse(&line[at..]).map_err(|_| invalid())?;
+    let num = |t: &str| fmt.parse_num(t).map_err(|_| invalid());
+    let center = match kind {
+        'A' => ArcCenter::Radius(num(first)?),
+        'I' => ArcCenter::Offset {
+            i: num(first)?,
+            j: second.map(num).transpose()?.unwrap_or(0.0),
+        },
+        _ => ArcCenter::Offset {
+            i: 0.0,
+            j: num(first)?,
+        },
+    };
+    Ok(LineResult::RawArc(x, y, center))
 }
 
 fn parse_feed(tail: &str, line: &str) -> Result<LineResult, ExcellonError> {
@@ -1099,9 +1225,15 @@ where
                             }
                             Ok(cmd)
                         }
-                        LineResult::RawCoordinate(_, _) if !unit_set => {
+                        LineResult::RawCoordinate(..) | LineResult::RawArc(..) if !unit_set => {
                             Err(ExcellonError::CoordinateBeforeUnit)
                         }
+                        LineResult::RawArc(x, y, center) => Ok(Command::Arc {
+                            x,
+                            y,
+                            center,
+                            fmt: format.clone(),
+                        }),
                         LineResult::RawCoordinate(x, y) => {
                             Ok(Command::Coordinate(x, y, format.clone()))
                         }
@@ -1522,6 +1654,51 @@ mod tests {
             &coords(&data),
             &[(1.0, 1.0), (1.5, 1.0), (2.0, 1.0), (2.5, 1.0), (10.0, 10.0)],
         );
+        Ok(())
+    }
+
+    /// Circular routes keep their radius / centre offset through parse,
+    /// rotation and write.
+    #[test]
+    fn test_arc_routes() -> Result<(), Box<dyn std::error::Error>> {
+        let raw = "M48\nMETRIC\nT01C0.6\n%\nT01\nG00X1.0Y0.0\nM15\nG03X0.0Y1.0A1.0\n\
+                   G02X1.0Y2.0I1.0J0.0\nX2.0Y1.0J-1.0\nM17\nM30\n";
+        let mut data = parse_excellon(BufReader::new(Cursor::new(raw)))?;
+        for cmd in &data.commands {
+            cmd.clone()?;
+        }
+        let arcs = |d: &ExcellonLayerData| -> Vec<ArcCenter> {
+            d.commands
+                .iter()
+                .filter_map(|c| match c {
+                    Ok(Command::Arc { center, .. }) => Some(*center),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(
+            arcs(&data),
+            [
+                ArcCenter::Radius(1.0),
+                ArcCenter::Offset { i: 1.0, j: 0.0 },
+                ArcCenter::Offset { i: 0.0, j: -1.0 },
+            ]
+        );
+        let mut out = BufWriter::new(Vec::new());
+        data.write_to(&mut out)?;
+        let text = String::from_utf8(out.into_inner()?)?;
+        assert!(text.contains("X0.0Y1.0A1.0"), "{text}");
+        assert!(text.contains("X1.0Y2.0I1.0J0.0"), "{text}");
+
+        // One CW quarter turn: (i, j) -> (j, -i).
+        data.rebase(1, &Pos::default());
+        assert_eq!(arcs(&data)[1], ArcCenter::Offset { i: 0.0, j: -1.0 });
+        let (min, max) = parse_excellon(BufReader::new(Cursor::new(raw)))?.get_corners();
+        // Arcs around (0,0) and (1,1) stay within their end points; the
+        // 0.6 mm tool adds 0.3 mm on every side.
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(near(min.x, -0.3) && near(min.y, -0.3), "{min:?}");
+        assert!(near(max.x, 2.3) && near(max.y, 2.3), "{max:?}");
         Ok(())
     }
 }

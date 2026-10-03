@@ -28,8 +28,9 @@ impl ExcellonLayerData {
     ///
     /// Routing follows the plunge/retract codes when the program uses them
     /// (`M15` down, `M16`/`M17` up); otherwise every `G01`–`G03` move cuts.
-    /// Circular moves are drawn as chords and reported as an issue until the
-    /// parser reads arc parameters.
+    /// Circular routes (`A` radius or `I`/`J` centre) keep their exact arc;
+    /// a circular move without arc parameters is drawn as a chord and
+    /// reported.
     pub fn flatten_with(&self, options: &FlattenOptions) -> Result<FlatLayer, FlattenError> {
         let mut out = FlatLayer::default();
         let uses_router = self
@@ -53,13 +54,14 @@ impl ExcellonLayerData {
                     continue;
                 }
             };
-            let (start, end) = match command {
+            // `start` is `None` for a drill hit; `center` is set for arcs.
+            let (start, end, center) = match command {
                 Command::Tool(t) => {
                     code = self.tool_aperture(*t, &mut out, options);
                     continue;
                 }
                 Command::Geometric(GeometricCode::Mode(m)) => {
-                    mode = m.clone();
+                    mode = *m;
                     continue;
                 }
                 Command::Machine(MachineCode::RouterDown) => {
@@ -70,9 +72,13 @@ impl ExcellonLayerData {
                     router_down = false;
                     continue;
                 }
-                Command::Coordinate(x, y, fmt) => {
+                Command::Coordinate(x, y, fmt) | Command::Arc { x, y, fmt, .. } => {
                     let start = current.clone();
                     current = resolve_point(*x, *y, &fmt.unit, &current);
+                    let arc = match command {
+                        Command::Arc { center, .. } => Some(center),
+                        _ => None,
+                    };
                     let cuts = match mode {
                         Mode::DrillMode | Mode::CannedDrill => None,
                         _ if uses_router => Some(router_down),
@@ -81,19 +87,26 @@ impl ExcellonLayerData {
                     };
                     match cuts {
                         // A drill hit.
-                        None => (None, point(&current)),
+                        None => (None, point(&current), None),
                         Some(true) => {
-                            if matches!(mode, Mode::CircularCW | Mode::CircularCWW) && !reported_arc
-                            {
+                            *out.features.entry(SpecFeature::ExcellonRoute).or_default() += 1;
+                            let (start, end) = (point(&start), point(&current));
+                            let ccw = mode == Mode::CircularCWW;
+                            let circular = matches!(mode, Mode::CircularCW | Mode::CircularCWW);
+                            let center = arc
+                                .filter(|_| circular)
+                                .map(|c| c.center_mm(start, end, &fmt.unit, ccw));
+                            if circular && center.is_none() && !reported_arc {
                                 reported_arc = true;
                                 issue(
                                     &mut out,
                                     index,
-                                    FlattenIssueKind::Unsupported("Excellon arc (G02/G03)"),
+                                    FlattenIssueKind::Unsupported(
+                                        "circular route without A or I/J (drawn straight)",
+                                    ),
                                 );
                             }
-                            *out.features.entry(SpecFeature::ExcellonRoute).or_default() += 1;
-                            (Some(point(&start)), point(&current))
+                            (Some(start), end, center.map(|c| (c, ccw)))
                         }
                         // Reposition with the router up.
                         Some(false) => continue,
@@ -109,7 +122,7 @@ impl ExcellonLayerData {
                     let from = resolve_point(*from_x, *from_y, &fmt.unit, &current);
                     current = resolve_point(*to_x, *to_y, &fmt.unit, &from);
                     *out.features.entry(SpecFeature::ExcellonSlot).or_default() += 1;
-                    (Some(point(&from)), point(&current))
+                    (Some(point(&from)), point(&current), None)
                 }
                 _ => continue,
             };
@@ -123,9 +136,17 @@ impl ExcellonLayerData {
             let (shape, transform) = match start {
                 None => (Shape::Flash, Affine2::translate(end[0], end[1])),
                 Some(start) => {
+                    let segment = match center {
+                        Some((center, ccw)) => Segment::Arc {
+                            to: end,
+                            center,
+                            ccw,
+                        },
+                        None => Segment::Line { to: end },
+                    };
                     let path = Path {
                         start,
-                        segments: vec![Segment::Line { to: end }],
+                        segments: vec![segment],
                     };
                     (Shape::Path(path), Affine2::IDENTITY)
                 }
@@ -231,6 +252,35 @@ mod tests {
     fn g01_cuts_without_router_codes() {
         let layer = flat("M48\nMETRIC\nT01C0.6\n%\nT01\nG00X1.0Y1.0\nG01X2.0\nG00X3.0\nM30\n");
         assert_eq!(objects(&layer).len(), 1);
+    }
+
+    #[test]
+    fn circular_routes_keep_exact_arcs() {
+        let layer = flat(
+            "M48\nMETRIC\nT01C0.6\n%\nT01\nG00X1.0Y0.0\nG03X0.0Y1.0A1.0\n\
+             G02X1.0Y2.0I1.0J0.0\nG03X0.0Y3.0\nM30\n",
+        );
+        let Shape::Path(p) = &objects(&layer)[0].shape else {
+            panic!("expected a path");
+        };
+        assert_eq!(p.segments.len(), 3);
+        let Segment::Arc { center, ccw, .. } = p.segments[0] else {
+            panic!("expected an arc");
+        };
+        assert!(
+            ccw && center[0].abs() < 1e-12 && center[1].abs() < 1e-12,
+            "{center:?}"
+        );
+        assert_eq!(
+            p.segments[1],
+            Segment::Arc {
+                to: [1.0, 2.0],
+                center: [1.0, 1.0],
+                ccw: false
+            }
+        );
+        assert!(matches!(p.segments[2], Segment::Line { .. }));
+        assert_eq!(layer.issues.len(), 1);
     }
 
     #[test]

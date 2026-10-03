@@ -18,12 +18,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resource limits. `FlatLayer::iter_expanded` walks the expanded stream.
 - `ExcellonLayerData::flatten` / `flatten_with`: drill hits as flashes,
   routed moves and G85 slots as strokes (router codes respected), one
-  circular aperture per tool. Circular routes are reported as an issue
-  until arc parameters are parsed.
+  circular aperture per tool.
+- Excellon circular routes: `X..Y..A<r>` and `X..Y..I..J..` parse into the
+  new `Command::Arc` (`ArcCenter::{Radius, Offset}`) and survive transform,
+  rotate, scale, merge and write; `get_corners` and `flatten` use the exact
+  arc.
+
+### Changed
+- `excellon_format::Command` and `ExcellonError` are `#[non_exhaustive]`;
+  `Mode` is `Copy`.
 
 ### Fixed
 - `get_corners` finds the real centre of single-quadrant (G74) arcs instead
   of adding the unsigned offsets.
+- Excellon arc lines (`G02X..Y..A..`) no longer fail to parse.
 
 ## [0.6.1] - 2026-10-03
 

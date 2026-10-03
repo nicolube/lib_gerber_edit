@@ -421,8 +421,7 @@ fn update_pos(pos: &mut Pos, coords: &Coordinates, unit: &Unit) {
 /// Returns the bounding box of a circular arc.
 ///
 /// `offset` is the I/J vector from `start` to the arc center (signed for
-/// G75, unsigned magnitudes for G74). Cardinal axis-extremes of the circle
-/// (0°, 90°, 180°, 270°) are included when they fall within the arc's sweep.
+/// G75, unsigned magnitudes for G74).
 fn arc_corners(
     start: &Pos,
     end: &Pos,
@@ -431,8 +430,6 @@ fn arc_corners(
     mode: InterpolationMode,
     quadrant: QuadrantMode,
 ) -> (Pos, Pos) {
-    use std::f64::consts::{FRAC_PI_2, PI};
-
     let i = offset.x.map(|v| f64::from(v.to_mm(unit))).unwrap_or(0.0);
     let j = offset.y.map(|v| f64::from(v.to_mm(unit))).unwrap_or(0.0);
 
@@ -447,63 +444,13 @@ fn arc_corners(
         )
         .unwrap_or([start.x + i, start.y + j]),
     };
-    let radius = (start.x - cx).hypot(start.y - cy);
-
-    let start_angle = (start.y - cy).atan2(start.x - cx);
-    let end_angle = (end.y - cy).atan2(end.x - cx);
-
-    let mut min_x = start.x.min(end.x);
-    let mut min_y = start.y.min(end.y);
-    let mut max_x = start.x.max(end.x);
-    let mut max_y = start.y.max(end.y);
-
-    for (angle, px, py) in [
-        (0.0_f64, cx + radius, cy),
-        (FRAC_PI_2, cx, cy + radius),
-        (PI, cx - radius, cy),
-        (-FRAC_PI_2, cx, cy - radius),
-    ] {
-        if angle_in_arc(start_angle, end_angle, angle, mode) {
-            min_x = min_x.min(px);
-            min_y = min_y.min(py);
-            max_x = max_x.max(px);
-            max_y = max_y.max(py);
-        }
-    }
-
-    (Pos { x: min_x, y: min_y }, Pos { x: max_x, y: max_y })
-}
-
-/// Returns true if `angle` (radians) is swept when travelling from `start` to
-/// `end` in the given circular interpolation direction.
-fn angle_in_arc(start: f64, end: f64, angle: f64, mode: InterpolationMode) -> bool {
-    use std::f64::consts::PI;
-
-    let norm = |a: f64| {
-        let a = a.rem_euclid(2.0 * PI);
-        if a > PI { a - 2.0 * PI } else { a }
-    };
-
-    // For CW, sweeping clockwise from start→end is the same as CCW from end→start.
-    let (arc_start, arc_end) = match mode {
-        InterpolationMode::CounterclockwiseCircular => (norm(start), norm(end)),
-        InterpolationMode::ClockwiseCircular => (norm(end), norm(start)),
-        InterpolationMode::Linear => return false,
-    };
-
-    let angle = norm(angle);
-
-    // Equal start/end means a full circle.
-    if (arc_start - arc_end).abs() < 1e-10 {
-        return true;
-    }
-
-    if arc_start <= arc_end {
-        angle >= arc_start && angle <= arc_end
-    } else {
-        // Arc crosses the ±π discontinuity.
-        angle >= arc_start || angle <= arc_end
-    }
+    let ([x0, y0], [x1, y1]) = crate::flatten::geom::arc_bounds(
+        [start.x, start.y],
+        [end.x, end.y],
+        [cx, cy],
+        mode == InterpolationMode::CounterclockwiseCircular,
+    );
+    (Pos { x: x0, y: y0 }, Pos { x: x1, y: y1 })
 }
 
 impl LayerCorners for (&Unit, &Vec<Command>) {

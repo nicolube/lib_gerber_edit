@@ -162,6 +162,51 @@ pub(crate) fn single_quadrant_center(
         .map(|(c, _)| c)
 }
 
+/// Centre of the arc of `radius` from `start` to `end`. A positive radius
+/// gives the arc of at most 180°, a negative one the longer arc. A chord
+/// longer than the diameter is treated as a half circle.
+pub(crate) fn arc_center_from_radius(start: Point, end: Point, radius: f64, ccw: bool) -> Point {
+    let mid = [(start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0];
+    let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
+    let chord = dx.hypot(dy);
+    if chord == 0.0 {
+        return mid;
+    }
+    let half = chord / 2.0;
+    let h = (radius * radius - half * half).max(0.0).sqrt();
+    // Left of the chord direction is the centre of a short CCW arc.
+    let left = if ccw == (radius >= 0.0) { 1.0 } else { -1.0 };
+    [
+        mid[0] - dy / chord * h * left,
+        mid[1] + dx / chord * h * left,
+    ]
+}
+
+/// Bounding box of the arc from `start` to `end` around `center`; a full
+/// circle when the ends meet.
+pub(crate) fn arc_bounds(start: Point, end: Point, center: Point, ccw: bool) -> (Point, Point) {
+    use std::f64::consts::{FRAC_PI_2, TAU};
+    let r = (start[0] - center[0]).hypot(start[1] - center[1]);
+    let a0 = (start[1] - center[1]).atan2(start[0] - center[0]);
+    let a1 = (end[1] - center[1]).atan2(end[0] - center[0]);
+    let mut sweep = if ccw { a1 - a0 } else { a0 - a1 }.rem_euclid(TAU);
+    if sweep == 0.0 {
+        sweep = TAU;
+    }
+    let mut lo = [start[0].min(end[0]), start[1].min(end[1])];
+    let mut hi = [start[0].max(end[0]), start[1].max(end[1])];
+    for k in 0..4 {
+        let a = k as f64 * FRAC_PI_2;
+        let from_start = if ccw { a - a0 } else { a0 - a }.rem_euclid(TAU);
+        if from_start <= sweep {
+            let p = [center[0] + r * a.cos(), center[1] + r * a.sin()];
+            lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+            hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+        }
+    }
+    (lo, hi)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +261,42 @@ mod tests {
         cw.reverse();
         let u = union(simple(rect([0.0, 0.0], 2.0, 2.0)), simple(cw));
         assert!((u.area() - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn arc_center_from_radius_picks_side() {
+        // Quarter arc from (1,0) to (0,1): CCW short arc is centred at origin.
+        let c = arc_center_from_radius([1.0, 0.0], [0.0, 1.0], 1.0, true);
+        assert!(c[0].abs() < 1e-12 && c[1].abs() < 1e-12, "{c:?}");
+        let c = arc_center_from_radius([1.0, 0.0], [0.0, 1.0], 1.0, false);
+        assert!(
+            (c[0] - 1.0).abs() < 1e-12 && (c[1] - 1.0).abs() < 1e-12,
+            "{c:?}"
+        );
+        let c = arc_center_from_radius([1.0, 0.0], [0.0, 1.0], -1.0, false);
+        assert!(c[0].abs() < 1e-12 && c[1].abs() < 1e-12, "{c:?}");
+    }
+
+    #[test]
+    fn arc_bounds_includes_extremes_in_sweep() {
+        let near = |(lo, hi): (Point, Point), want: [f64; 4]| {
+            let got = [lo[0], lo[1], hi[0], hi[1]];
+            assert!(
+                got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-12),
+                "{got:?}"
+            );
+        };
+        near(
+            arc_bounds([1.0, 0.0], [-1.0, 0.0], [0.0, 0.0], true),
+            [-1.0, 0.0, 1.0, 1.0],
+        );
+        near(
+            arc_bounds([1.0, 0.0], [-1.0, 0.0], [0.0, 0.0], false),
+            [-1.0, -1.0, 1.0, 0.0],
+        );
+        near(
+            arc_bounds([1.0, 0.0], [1.0, 0.0], [0.0, 0.0], true),
+            [-1.0, -1.0, 1.0, 1.0],
+        );
     }
 }
