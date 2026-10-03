@@ -90,6 +90,8 @@ struct Builder<'a> {
     quadrant: QuadrantMode,
     polarity: Polarity,
     region: Option<Region>,
+    /// The move that positioned the next draw, if it came directly before.
+    last_move: Option<usize>,
 }
 
 impl<'a> Builder<'a> {
@@ -114,6 +116,7 @@ impl<'a> Builder<'a> {
             quadrant: QuadrantMode::Multi,
             polarity: Polarity::Dark,
             region: None,
+            last_move: None,
         }
     }
 
@@ -376,6 +379,7 @@ impl<'a> Builder<'a> {
         match op {
             Operation::Move(coords) => {
                 self.current = self.target(coords);
+                self.last_move = Some(index);
                 if let Some(region) = &mut self.region
                     && let Some(contour) = region.contour.take()
                 {
@@ -384,6 +388,7 @@ impl<'a> Builder<'a> {
             }
             Operation::Flash(coords) => {
                 self.current = self.target(coords);
+                self.last_move = None;
                 if self.region.is_some() {
                     self.issue(index, FlattenIssueKind::FlashInRegion);
                 } else {
@@ -395,17 +400,20 @@ impl<'a> Builder<'a> {
                 let end = self.target(coords);
                 self.current = end;
                 let segment = self.segment(index, start, end, offset.as_ref());
+                let source = SourceRange {
+                    start: self.last_move.take().unwrap_or(index),
+                    end: index + 1,
+                };
                 if let Some(region) = &mut self.region {
-                    region
-                        .contour
-                        .get_or_insert_with(|| Path {
-                            start,
-                            segments: Vec::new(),
-                        })
-                        .segments
-                        .push(segment);
+                    let contour = region.contour.get_or_insert_with(|| Path {
+                        start,
+                        segments: Vec::new(),
+                        sources: Vec::new(),
+                    });
+                    contour.segments.push(segment);
+                    contour.sources.push(source);
                 } else {
-                    self.stroke(index, start, segment)?;
+                    self.stroke(index, source, start, segment)?;
                 }
             }
         }
@@ -435,7 +443,13 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    fn stroke(&mut self, index: usize, start: Point, segment: Segment) -> Result<(), FlattenError> {
+    fn stroke(
+        &mut self,
+        index: usize,
+        source: SourceRange,
+        start: Point,
+        segment: Segment,
+    ) -> Result<(), FlattenError> {
         let Some(code) = self.aperture else {
             self.issue(index, FlattenIssueKind::NoAperture);
             return Ok(());
@@ -444,8 +458,8 @@ impl<'a> Builder<'a> {
             let path = Path {
                 start,
                 segments: vec![segment],
+                sources: vec![source],
             };
-            let source = SourceRange::single(index);
             self.object(Shape::Path(path), source, Some(code), [0.0, 0.0]);
         }
         Ok(())
@@ -497,6 +511,7 @@ impl<'a> Builder<'a> {
             if !same_point(contour.start, contour.end()) {
                 open = true;
                 contour.segments.push(Segment::Line { to: contour.start });
+                contour.sources.push(SourceRange::single(index));
             }
         }
         if open {
@@ -574,6 +589,13 @@ mod tests {
         };
         assert_eq!(path.start, [0.0, 0.0]);
         assert_eq!(path.segments.len(), 2);
+        // Commands: D10, X0Y0D02, X1Y0D01, Y1D01 — the first draw owns the
+        // move that positioned it.
+        assert_eq!(
+            path.sources,
+            [SourceRange { start: 1, end: 3 }, SourceRange::single(3)]
+        );
+        assert_eq!(objs[0].source, SourceRange { start: 1, end: 4 });
         assert_eq!(path.end(), [1.0, 1.0]);
         assert_eq!(objs[0].aperture, Some(10));
 

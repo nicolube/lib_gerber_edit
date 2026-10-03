@@ -147,6 +147,7 @@ impl ExcellonLayerData {
                     let path = Path {
                         start,
                         segments: vec![segment],
+                        sources: vec![SourceRange::single(index)],
                     };
                     (Shape::Path(path), Affine2::IDENTITY)
                 }

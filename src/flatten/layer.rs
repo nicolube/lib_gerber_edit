@@ -86,6 +86,15 @@ impl Polarity {
     }
 }
 
+impl From<Polarity> for gerber_parser::gerber_types::Polarity {
+    fn from(p: Polarity) -> Self {
+        match p {
+            Polarity::Dark => gerber_parser::gerber_types::Polarity::Dark,
+            Polarity::Clear => gerber_parser::gerber_types::Polarity::Clear,
+        }
+    }
+}
+
 impl From<gerber_parser::gerber_types::Polarity> for Polarity {
     fn from(p: gerber_parser::gerber_types::Polarity) -> Self {
         match p {
@@ -140,6 +149,11 @@ impl Segment {
 pub struct Path {
     pub start: Point,
     pub segments: Vec<Segment>,
+    /// Commands that produced each segment (parallel to `segments`): the
+    /// draw, preceded by the move that positioned it when the move came
+    /// directly before. A segment whose range starts with a move begins a
+    /// new piece in the source file.
+    pub sources: Vec<SourceRange>,
 }
 
 impl Path {
@@ -449,6 +463,7 @@ pub(super) fn push_op(ops: &mut Vec<Op>, op: Op) {
         && same_point(prev.end(), next.start)
     {
         prev.segments.extend_from_slice(&next.segments);
+        prev.sources.extend_from_slice(&next.sources);
         prev_source.end = source.end;
         return;
     }
@@ -590,6 +605,7 @@ mod tests {
                 },
                 Segment::Line { to: [0.0, 2.0] },
             ],
+            sources: Vec::new(),
         };
         let points = path.to_polyline(0.001);
         assert_eq!(points.first(), Some(&[1.0, 0.0]));
