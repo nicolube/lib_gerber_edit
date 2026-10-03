@@ -136,6 +136,32 @@ pub fn difference(subject: Shapes, clip: &Shapes) -> Shapes {
     subject.overlay(clip, OverlayRule::Difference, FillRule::NonZero)
 }
 
+/// Centre of a G74 (single-quadrant) arc: `i`/`j` are unsigned, so the
+/// centre is the candidate equidistant from both ends with a sweep of at
+/// most 90°.
+pub(crate) fn single_quadrant_center(
+    start: Point,
+    end: Point,
+    i: f64,
+    j: f64,
+    ccw: bool,
+) -> Option<Point> {
+    use std::f64::consts::{FRAC_PI_2, TAU};
+    [(i, j), (-i, j), (i, -j), (-i, -j)]
+        .into_iter()
+        .map(|(di, dj)| [start[0] + di, start[1] + dj])
+        .filter_map(|c| {
+            let r0 = (start[0] - c[0]).hypot(start[1] - c[1]);
+            let r1 = (end[0] - c[0]).hypot(end[1] - c[1]);
+            let a0 = (start[1] - c[1]).atan2(start[0] - c[0]);
+            let a1 = (end[1] - c[1]).atan2(end[0] - c[0]);
+            let sweep = if ccw { a1 - a0 } else { a0 - a1 }.rem_euclid(TAU);
+            (sweep <= FRAC_PI_2 + 1e-6).then_some((c, (r0 - r1).abs()))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(c, _)| c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

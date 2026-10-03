@@ -189,6 +189,11 @@ impl GerberLayerData {
         self.commands.is_empty()
     }
 
+    /// Unit the coordinates and apertures are stored in.
+    pub(crate) fn unit(&self) -> &Unit {
+        &self.unit
+    }
+
     /// Converts all commands to given Unit
     pub fn to_unit(mut self, unit: &Unit) -> Self {
         if unit == &self.unit {
@@ -415,35 +420,34 @@ fn update_pos(pos: &mut Pos, coords: &Coordinates, unit: &Unit) {
 
 /// Returns the bounding box of a circular arc.
 ///
-/// `offset` is the I/J vector from `start` to the arc center.
-/// Cardinal axis-extremes of the circle (0°, 90°, 180°, 270°) are included
-/// when they fall within the arc's sweep.
-///
-/// # Spec compliance (RS-274X §5.3)
-/// This function correctly handles **multi-quadrant (G75)** arcs where I/J are
-/// signed offsets. **Single-quadrant (G74)** arcs are not fully handled: in G74
-/// mode I/J are unsigned magnitudes and the actual direction to the center is
-/// determined implicitly from which of the four possible centers lies on the
-/// perpendicular bisector of the chord. Since the parser delivers the raw
-/// positive values, this function would only compute the correct center when
-/// the center lies in the +X/+Y direction from start. In practice nearly all
-/// modern Gerber files use G75, and the spec itself recommends always
-/// specifying the quadrant mode explicitly.
+/// `offset` is the I/J vector from `start` to the arc center (signed for
+/// G75, unsigned magnitudes for G74). Cardinal axis-extremes of the circle
+/// (0°, 90°, 180°, 270°) are included when they fall within the arc's sweep.
 fn arc_corners(
     start: &Pos,
     end: &Pos,
     offset: &CoordinateOffset,
     unit: &Unit,
     mode: InterpolationMode,
+    quadrant: QuadrantMode,
 ) -> (Pos, Pos) {
     use std::f64::consts::{FRAC_PI_2, PI};
 
     let i = offset.x.map(|v| f64::from(v.to_mm(unit))).unwrap_or(0.0);
     let j = offset.y.map(|v| f64::from(v.to_mm(unit))).unwrap_or(0.0);
 
-    let cx = start.x + i;
-    let cy = start.y + j;
-    let radius = (i * i + j * j).sqrt();
+    let [cx, cy] = match quadrant {
+        QuadrantMode::Multi => [start.x + i, start.y + j],
+        QuadrantMode::Single => crate::flatten::geom::single_quadrant_center(
+            [start.x, start.y],
+            [end.x, end.y],
+            i.abs(),
+            j.abs(),
+            mode == InterpolationMode::CounterclockwiseCircular,
+        )
+        .unwrap_or([start.x + i, start.y + j]),
+    };
+    let radius = (start.x - cx).hypot(start.y - cy);
 
     let start_angle = (start.y - cy).atan2(start.x - cx);
     let end_angle = (end.y - cy).atan2(end.x - cx);
@@ -536,6 +540,7 @@ impl LayerCorners for GerberLayerData {
         let mut tool = None;
         let mut current_pos = Pos::default();
         let mut interp_mode = InterpolationMode::Linear;
+        let mut quadrant = QuadrantMode::Multi;
 
         for command in self.commands.iter() {
             match command {
@@ -546,6 +551,9 @@ impl LayerCorners for GerberLayerData {
                 }
                 Command::FunctionCode(FunctionCode::GCode(GCode::InterpolationMode(mode))) => {
                     interp_mode = *mode;
+                }
+                Command::FunctionCode(FunctionCode::GCode(GCode::QuadrantMode(mode))) => {
+                    quadrant = *mode;
                 }
                 Command::FunctionCode(FunctionCode::DCode(DCode::Operation(op))) => match op {
                     Operation::Move(Some(coords)) => {
@@ -563,7 +571,7 @@ impl LayerCorners for GerberLayerData {
                         let start = current_pos.clone();
                         update_pos(&mut current_pos, end_coords, unit);
                         let (arc_min, arc_max) =
-                            arc_corners(&start, &current_pos, offset, unit, interp_mode);
+                            arc_corners(&start, &current_pos, offset, unit, interp_mode, quadrant);
                         let default = (Pos::default(), Pos::default());
                         let (tool_min, tool_max) = tool.as_ref().unwrap_or(&default);
                         min.x = min.x.min(arc_min.x + tool_min.x);
@@ -1203,6 +1211,31 @@ M02*
     }
 
     /// `FS..I..` incremental coordinates are resolved to absolute on load.
+    #[test]
+    fn test_single_quadrant_arc_corners() -> Result<(), Box<dyn std::error::Error>> {
+        // Quarter circle (1,0) -> (0,1) around the origin; G74 offsets are
+        // unsigned, so the centre must be found, not added.
+        let gbr = "\
+%FSLAX46Y46*%
+%MOMM*%
+%ADD10C,0.010000*%
+D10*
+G74*
+X1000000Y0D02*
+G03*
+X0Y1000000I1000000J0D01*
+M02*
+";
+        let layer = GerberLayerData::from_type(LayerType::Top, BufReader::new(gbr.as_bytes()))?;
+        let (min, max) = layer.get_corners();
+        assert!(min.x.abs() < 1e-9 && min.y.abs() < 1e-9, "{min:?}");
+        assert!(
+            (max.x - 1.0).abs() < 1e-9 && (max.y - 1.0).abs() < 1e-9,
+            "{max:?}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn test_incremental_coordinates_resolved() -> Result<(), Box<dyn std::error::Error>> {
         let gbr = "\

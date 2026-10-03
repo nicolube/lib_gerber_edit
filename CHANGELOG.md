@@ -11,6 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `flatten` module: `aperture_shapes` turns any aperture into polygons in mm,
   including holes and aperture macros (expressions, variables, all
   primitives, exposure off, rotation). Errors come back as `MacroError`.
+- `GerberLayerData::flatten` / `flatten_with` return a `FlatLayer`: strokes,
+  flashes and regions in mm in compositing order, with exact arcs (G74 and
+  G75), clear polarity, step-and-repeat and aperture blocks kept once as
+  instanced definitions, aperture images per D-code, per-object issues and
+  resource limits. `FlatLayer::iter_expanded` walks the expanded stream.
+
+### Fixed
+- `get_corners` finds the real centre of single-quadrant (G74) arcs instead
+  of adding the unsigned offsets.
 
 ## [0.6.1] - 2026-10-03
 
