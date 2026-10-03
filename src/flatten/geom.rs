@@ -23,7 +23,7 @@ const MAX_CIRCLE_SEGMENTS: usize = 4096;
 
 /// Segments needed so a full circle of `radius` deviates from the true arc
 /// by at most `tolerance`.
-fn circle_segments(radius: f64, tolerance: f64) -> usize {
+pub(crate) fn circle_segments(radius: f64, tolerance: f64) -> usize {
     if radius <= tolerance {
         return MIN_CIRCLE_SEGMENTS;
     }
@@ -136,6 +136,17 @@ pub fn difference(subject: Shapes, clip: &Shapes) -> Shapes {
     subject.overlay(clip, OverlayRule::Difference, FillRule::NonZero)
 }
 
+/// Radius, start angle and sweep (radians, in `[0, 2π)`, along the arc's
+/// direction) of the arc from `start` to `end` around `center`. A sweep of
+/// 0 means the ends meet; callers decide whether that is a full circle.
+pub(crate) fn arc_angles(start: Point, end: Point, center: Point, ccw: bool) -> (f64, f64, f64) {
+    let r = (start[0] - center[0]).hypot(start[1] - center[1]);
+    let a0 = (start[1] - center[1]).atan2(start[0] - center[0]);
+    let a1 = (end[1] - center[1]).atan2(end[0] - center[0]);
+    let sweep = if ccw { a1 - a0 } else { a0 - a1 }.rem_euclid(std::f64::consts::TAU);
+    (r, a0, sweep)
+}
+
 /// Centre of a G74 (single-quadrant) arc: `i`/`j` are unsigned, so the
 /// centre is the candidate equidistant from both ends with a sweep of at
 /// most 90°.
@@ -146,16 +157,13 @@ pub(crate) fn single_quadrant_center(
     j: f64,
     ccw: bool,
 ) -> Option<Point> {
-    use std::f64::consts::{FRAC_PI_2, TAU};
+    use std::f64::consts::FRAC_PI_2;
     [(i, j), (-i, j), (i, -j), (-i, -j)]
         .into_iter()
         .map(|(di, dj)| [start[0] + di, start[1] + dj])
         .filter_map(|c| {
-            let r0 = (start[0] - c[0]).hypot(start[1] - c[1]);
+            let (r0, _, sweep) = arc_angles(start, end, c, ccw);
             let r1 = (end[0] - c[0]).hypot(end[1] - c[1]);
-            let a0 = (start[1] - c[1]).atan2(start[0] - c[0]);
-            let a1 = (end[1] - c[1]).atan2(end[0] - c[0]);
-            let sweep = if ccw { a1 - a0 } else { a0 - a1 }.rem_euclid(TAU);
             (sweep <= FRAC_PI_2 + 1e-6).then_some((c, (r0 - r1).abs()))
         })
         .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -186,10 +194,7 @@ pub(crate) fn arc_center_from_radius(start: Point, end: Point, radius: f64, ccw:
 /// circle when the ends meet.
 pub(crate) fn arc_bounds(start: Point, end: Point, center: Point, ccw: bool) -> (Point, Point) {
     use std::f64::consts::{FRAC_PI_2, TAU};
-    let r = (start[0] - center[0]).hypot(start[1] - center[1]);
-    let a0 = (start[1] - center[1]).atan2(start[0] - center[0]);
-    let a1 = (end[1] - center[1]).atan2(end[0] - center[0]);
-    let mut sweep = if ccw { a1 - a0 } else { a0 - a1 }.rem_euclid(TAU);
+    let (r, a0, mut sweep) = arc_angles(start, end, center, ccw);
     if sweep == 0.0 {
         sweep = TAU;
     }

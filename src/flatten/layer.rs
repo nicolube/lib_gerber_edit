@@ -146,6 +146,35 @@ impl Path {
     pub fn end(&self) -> Point {
         self.segments.last().map_or(self.start, Segment::end)
     }
+
+    /// The path as points, arcs approximated by chords that deviate at most
+    /// `tolerance` (mm) from the true arc.
+    pub fn to_polyline(&self, tolerance: f64) -> Vec<Point> {
+        use std::f64::consts::TAU;
+        let mut points = vec![self.start];
+        let mut current = self.start;
+        for segment in &self.segments {
+            match *segment {
+                Segment::Line { to } => points.push(to),
+                Segment::Arc { to, center, ccw } => {
+                    let (r, a0, mut sweep) = super::geom::arc_angles(current, to, center, ccw);
+                    if sweep == 0.0 {
+                        sweep = TAU;
+                    }
+                    let full = super::geom::circle_segments(r, tolerance) as f64;
+                    let n = ((sweep / TAU) * full).ceil().max(1.0) as usize;
+                    let dir = if ccw { 1.0 } else { -1.0 };
+                    points.extend((1..n).map(|i| {
+                        let a = a0 + dir * sweep * i as f64 / n as f64;
+                        [center[0] + r * a.cos(), center[1] + r * a.sin()]
+                    }));
+                    points.push(to);
+                }
+            }
+            current = segment.end();
+        }
+        points
+    }
 }
 
 /// Geometry of one graphics object, before its `transform`.
@@ -541,6 +570,38 @@ impl<'a> Iterator for ExpandedIter<'a> {
                 }
             };
             self.stack.push(push);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn polyline_follows_arcs_within_tolerance() {
+        let path = Path {
+            start: [1.0, 0.0],
+            segments: vec![
+                Segment::Arc {
+                    to: [0.0, 1.0],
+                    center: [0.0, 0.0],
+                    ccw: true,
+                },
+                Segment::Line { to: [0.0, 2.0] },
+            ],
+        };
+        let points = path.to_polyline(0.001);
+        assert_eq!(points.first(), Some(&[1.0, 0.0]));
+        assert_eq!(points.last(), Some(&[0.0, 2.0]));
+        let arc = &points[..points.len() - 1];
+        assert!(arc.len() > 5);
+        for p in arc {
+            assert!((p[0].hypot(p[1]) - 1.0).abs() < 1e-9);
+            assert!(
+                p[0] >= -1e-9 && p[1] >= -1e-9,
+                "stays in the first quadrant"
+            );
         }
     }
 }

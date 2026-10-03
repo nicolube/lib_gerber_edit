@@ -165,6 +165,10 @@ are polygons with outer contours counter-clockwise and holes clockwise
 tolerance `FlattenOptions::tolerance_mm`, default 0.002 mm); paths and
 regions keep exact arcs.
 
+A complete renderer in under 300 lines is in
+[`examples/render.rs`](examples/render.rs):
+`cargo run --example render -- test/mobo board.png 20`.
+
 ---
 
 ## Supported spec features
