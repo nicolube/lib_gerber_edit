@@ -127,8 +127,13 @@ impl GerberLayerData {
             .filter(|t| *t != LayerType::UndefinedGerber)
             .unwrap_or(ty);
 
-        let coordinate_format =
+        let mut coordinate_format =
             format_specification.ok_or(ParseError::FormatMissing(ty.to_string()))?;
+        resolve_operation_coords(
+            &mut commands,
+            coordinate_format.coordinate_mode == CoordinateMode::Incremental,
+        );
+        coordinate_format.coordinate_mode = CoordinateMode::Absolute;
         Ok(Self {
             unit: units.unwrap_or(Unit::Millimeters),
             coordinate_format,
@@ -680,32 +685,69 @@ macro_rules! coord_scaling {
 coord_scaling!(Coordinates);
 coord_scaling!(CoordinateOffset);
 
+/// Operation coordinates of `cmd`, if it is a D01/D02/D03 carrying any.
+fn operation_coords(cmd: &mut Command) -> Option<&mut Coordinates> {
+    match cmd {
+        Command::FunctionCode(FunctionCode::DCode(DCode::Operation(
+            Operation::Move(Some(coords))
+            | Operation::Flash(Some(coords))
+            | Operation::Interpolate(Some(coords), _),
+        ))) => Some(coords),
+        _ => None,
+    }
+}
+
+/// Writes both axes of every operation as absolute coordinates.
+///
+/// Gerber coordinates are modal (an omitted axis keeps its previous value) and
+/// may be incremental (`FS..I..`). Resolving both on load means transforms,
+/// merges and step-and-repeat never depend on earlier commands or on the mode.
+/// Arc I/J offsets are relative in both modes and stay as-is.
+fn resolve_operation_coords(commands: &mut [Command], incremental: bool) {
+    let (mut x, mut y) = (0.0, 0.0);
+    for cmd in commands.iter_mut() {
+        if let Some(coords) = operation_coords(cmd) {
+            let axis = |v: Option<CoordinateNumber>, cur: f64| match v {
+                Some(v) if incremental => cur + f64::from(v),
+                Some(v) => f64::from(v),
+                None => cur,
+            };
+            (x, y) = (axis(coords.x, x), axis(coords.y, y));
+            coords.x = CoordinateNumber::try_from(x).ok();
+            coords.y = CoordinateNumber::try_from(y).ok();
+        }
+    }
+}
+
+/// Rotates `coords` by `rotation_steps` CW quarter-turns about the origin and then
+/// translates by `(dx, dy)`.
+///
+/// `current` is the modal current point before this operation (pre-transform).
+/// Gerber coordinates are modal: an omitted axis keeps its previous value. A pure
+/// translation keeps omitted axes omitted (they inherit an already shifted value),
+/// but a rotation mixes both axes, so the omitted one is filled in from `current`
+/// and both are written.
 fn rotate_and_translate_coords(
     coords: &mut Coordinates,
-    cx: f64,
-    cy: f64,
+    current: &mut (f64, f64),
     dx: f64,
     dy: f64,
     rotation_steps: i32,
 ) {
-    let mut x = coords.x.map(f64::from).unwrap_or(0.0);
-    let mut y = coords.y.map(f64::from).unwrap_or(0.0);
+    let x = coords.x.map(f64::from).unwrap_or(current.0);
+    let y = coords.y.map(f64::from).unwrap_or(current.1);
+    *current = (x, y);
     if rotation_steps != 0 {
-        let (rx, ry) = crate::rotate_90(x - cx, y - cy, rotation_steps);
-        x = cx + rx;
-        y = cy + ry;
-    }
-    x += dx;
-    y += dy;
-    if let Some(ref mut xc) = coords.x
-        && let Ok(v) = CoordinateNumber::try_from(x)
-    {
-        *xc = v;
-    }
-    if let Some(ref mut yc) = coords.y
-        && let Ok(v) = CoordinateNumber::try_from(y)
-    {
-        *yc = v;
+        let (rx, ry) = crate::rotate_90(x, y, rotation_steps);
+        coords.x = CoordinateNumber::try_from(rx + dx).ok();
+        coords.y = CoordinateNumber::try_from(ry + dy).ok();
+    } else {
+        if coords.x.is_some() {
+            coords.x = CoordinateNumber::try_from(x + dx).ok();
+        }
+        if coords.y.is_some() {
+            coords.y = CoordinateNumber::try_from(y + dy).ok();
+        }
     }
 }
 
@@ -750,17 +792,18 @@ fn rotate_step_and_repeat(
 }
 
 fn rebase_gerber_commands(commands: &mut [Command], rot: i32, dx: f64, dy: f64) {
+    let mut current = (0.0, 0.0);
     for cmd in commands.iter_mut() {
         match cmd {
             Command::FunctionCode(FunctionCode::DCode(DCode::Operation(
                 Operation::Move(Some(coords)) | Operation::Flash(Some(coords)),
             ))) => {
-                rotate_and_translate_coords(coords, 0.0, 0.0, dx, dy, rot);
+                rotate_and_translate_coords(coords, &mut current, dx, dy, rot);
             }
             Command::FunctionCode(FunctionCode::DCode(DCode::Operation(
                 Operation::Interpolate(Some(coords), ij),
             ))) => {
-                rotate_and_translate_coords(coords, 0.0, 0.0, dx, dy, rot);
+                rotate_and_translate_coords(coords, &mut current, dx, dy, rot);
                 rotate_arc_ij_offset(ij, rot);
             }
             Command::ExtendedCode(ExtendedCode::StepAndRepeat(StepAndRepeat::Open {
@@ -1097,6 +1140,105 @@ M02*
             (max.y - 5.05).abs() < eps,
             "max.y: expected  5.05, got {}",
             max.y
+        );
+        Ok(())
+    }
+
+    /// Absolute operation points of a layer, resolving modal (omitted) axes.
+    fn resolved_points(layer: &GerberLayerData) -> Vec<(f64, f64)> {
+        let mut cur = (0.0, 0.0);
+        let mut out = Vec::new();
+        for cmd in &layer.commands {
+            if let Command::FunctionCode(FunctionCode::DCode(DCode::Operation(
+                Operation::Move(Some(c))
+                | Operation::Flash(Some(c))
+                | Operation::Interpolate(Some(c), _),
+            ))) = cmd
+            {
+                cur = (
+                    c.x.map(f64::from).unwrap_or(cur.0),
+                    c.y.map(f64::from).unwrap_or(cur.1),
+                );
+                out.push(cur);
+            }
+        }
+        out
+    }
+
+    fn assert_points(actual: &[(f64, f64)], expected: &[(f64, f64)]) {
+        assert_eq!(actual.len(), expected.len(), "{actual:?} vs {expected:?}");
+        for (a, e) in actual.iter().zip(expected) {
+            assert!(
+                (a.0 - e.0).abs() < 1e-6 && (a.1 - e.1).abs() < 1e-6,
+                "{actual:?} vs {expected:?}"
+            );
+        }
+    }
+
+    /// Altium/Eagle omit an axis that did not change. Rotating such a file must
+    /// fill the omitted axis from the modal current point, not treat it as 0.
+    #[test]
+    fn test_rebase_fills_modal_axis() -> Result<(), Box<dyn std::error::Error>> {
+        let gbr = "\
+%FSLAX46Y46*%
+%MOMM*%
+%ADD10C,0.100000*%
+D10*
+X1000000Y2000000D02*
+X3000000D01*
+Y4000000D01*
+M02*
+";
+        let mut layer = GerberLayerData::from_type(LayerType::Top, BufReader::new(gbr.as_bytes()))?;
+        layer.rebase(1, &Pos { x: 10.0, y: 0.0 });
+        // rotate_90 is a CW quarter-turn: (x, y) -> (y, -x), then +10 in X.
+        assert_points(
+            &resolved_points(&layer),
+            &[(12.0, -1.0), (12.0, -3.0), (14.0, -3.0)],
+        );
+        Ok(())
+    }
+
+    /// A pure translation keeps omitted axes omitted; they inherit the already
+    /// shifted value of the previous operation.
+    #[test]
+    fn test_rebase_translate_keeps_modal_axis() -> Result<(), Box<dyn std::error::Error>> {
+        let gbr = "\
+%FSLAX46Y46*%
+%MOMM*%
+%ADD10C,0.100000*%
+D10*
+X1000000Y2000000D02*
+X3000000D01*
+M02*
+";
+        let mut layer = GerberLayerData::from_type(LayerType::Top, BufReader::new(gbr.as_bytes()))?;
+        layer.rebase(0, &Pos { x: 1.0, y: 1.0 });
+        assert_points(&resolved_points(&layer), &[(2.0, 3.0), (4.0, 3.0)]);
+        Ok(())
+    }
+
+    /// `FS..I..` incremental coordinates are resolved to absolute on load.
+    #[test]
+    fn test_incremental_coordinates_resolved() -> Result<(), Box<dyn std::error::Error>> {
+        let gbr = "\
+%FSLIX46Y46*%
+%MOMM*%
+%ADD10C,0.100000*%
+D10*
+X1000000Y1000000D02*
+X2000000D01*
+Y3000000D01*
+M02*
+";
+        let layer = GerberLayerData::from_type(LayerType::Top, BufReader::new(gbr.as_bytes()))?;
+        assert_eq!(
+            layer.coordinate_format.coordinate_mode,
+            CoordinateMode::Absolute
+        );
+        assert_points(
+            &resolved_points(&layer),
+            &[(1.0, 1.0), (3.0, 1.0), (3.0, 4.0)],
         );
         Ok(())
     }

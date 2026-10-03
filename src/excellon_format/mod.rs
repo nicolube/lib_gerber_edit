@@ -84,17 +84,76 @@ impl ExcellonLayerData {
 
 impl LayerTransform for ExcellonLayerData {
     fn transform(&mut self, transform: &Pos) {
-        let mut commands = Vec::new();
-        commands.extend(self.header.iter_mut().filter_map(|x| x.as_mut().ok()));
-        commands.extend(self.commands.iter_mut().filter_map(|x| x.as_mut().ok()));
         let shift = |v: &mut Option<f64>, delta: f64, unit: &Unit| {
             *v = v.to_mm(unit).map(|n| n + delta).mm_to_unit(unit);
         };
-        commands.iter_mut().for_each(|cmd| match cmd {
-            Command::Coordinate(x, y, fmt) => {
-                shift(x, transform.x, &fmt.unit);
-                shift(y, transform.y, &fmt.unit);
+        for cmd in self
+            .header
+            .iter_mut()
+            .chain(self.commands.iter_mut())
+            .filter_map(|x| x.as_mut().ok())
+        {
+            match cmd {
+                Command::Coordinate(x, y, fmt) => {
+                    shift(x, transform.x, &fmt.unit);
+                    shift(y, transform.y, &fmt.unit);
+                }
+                Command::Slot {
+                    from_x,
+                    from_y,
+                    to_x,
+                    to_y,
+                    fmt,
+                } => {
+                    shift(from_x, transform.x, &fmt.unit);
+                    shift(to_x, transform.x, &fmt.unit);
+                    shift(from_y, transform.y, &fmt.unit);
+                    shift(to_y, transform.y, &fmt.unit);
+                }
+                _ => {}
             }
+        }
+    }
+}
+
+/// Rewrites a drill program to absolute coordinates with both axes written.
+///
+/// Incremental programs (`ICI` header, `G91`) are resolved and switched to
+/// absolute, and omitted (modal) axes are filled from the current point. After
+/// this, transforms, merges and bounds never depend on the input mode or on
+/// earlier commands.
+fn resolve_absolute_coordinates(
+    header: &mut [Result<Command, ExcellonParseFormat>],
+    commands: &mut [Result<Command, ExcellonParseFormat>],
+) {
+    let mut incremental = false;
+    // Current point in mm, so unit switches (M71/M72) between commands stay exact.
+    let mut current = (0.0, 0.0);
+    let mut resolve = |x: &mut Option<f64>, y: &mut Option<f64>, unit: &Unit, incremental: bool| {
+        let axis = |v: &Option<f64>, cur: f64| match v {
+            Some(v) if incremental => cur + v.to_mm(unit),
+            Some(v) => v.to_mm(unit),
+            None => cur,
+        };
+        current = (axis(x, current.0), axis(y, current.1));
+        *x = Some(current.0.mm_to_unit(unit));
+        *y = Some(current.1.mm_to_unit(unit));
+    };
+    for cmd in header
+        .iter_mut()
+        .chain(commands.iter_mut())
+        .filter_map(|c| c.as_mut().ok())
+    {
+        match cmd {
+            Command::Incremental(i) => {
+                incremental = *i;
+                *i = false;
+            }
+            Command::Geometric(GeometricCode::InputMode(m)) => {
+                incremental = *m == InputMode::Incremental;
+                *m = InputMode::Absolute;
+            }
+            Command::Coordinate(x, y, fmt) => resolve(x, y, &fmt.unit, incremental),
             Command::Slot {
                 from_x,
                 from_y,
@@ -102,25 +161,25 @@ impl LayerTransform for ExcellonLayerData {
                 to_y,
                 fmt,
             } => {
-                shift(from_x, transform.x, &fmt.unit);
-                shift(to_x, transform.x, &fmt.unit);
-                shift(from_y, transform.y, &fmt.unit);
-                shift(to_y, transform.y, &fmt.unit);
+                resolve(from_x, from_y, &fmt.unit, incremental);
+                resolve(to_x, to_y, &fmt.unit, incremental);
             }
             _ => {}
-        })
+        }
     }
 }
 
+/// Rotates every drill coordinate by `rot` CW quarter-turns about the origin.
+///
+/// Rotation mixes both axes, so both are always written; an omitted axis is
+/// filled from the current point (coordinates are absolute after load).
 fn rotate_excellon_coordinates(e: &mut ExcellonLayerData, rot: i32) {
-    let rot_pair = |x: &mut Option<f64>, y: &mut Option<f64>| {
-        let (rx, ry) = crate::rotate_90(x.unwrap_or(0.0), y.unwrap_or(0.0), rot);
-        if x.is_some() {
-            *x = Some(rx);
-        }
-        if y.is_some() {
-            *y = Some(ry);
-        }
+    let mut current = (0.0, 0.0);
+    let mut rot_point = |x: &mut Option<f64>, y: &mut Option<f64>| {
+        current = (x.unwrap_or(current.0), y.unwrap_or(current.1));
+        let (rx, ry) = crate::rotate_90(current.0, current.1, rot);
+        *x = Some(rx);
+        *y = Some(ry);
     };
     for cmd in e
         .header
@@ -129,7 +188,7 @@ fn rotate_excellon_coordinates(e: &mut ExcellonLayerData, rot: i32) {
         .filter_map(|c| c.as_mut().ok())
     {
         match cmd {
-            Command::Coordinate(x, y, _) => rot_pair(x, y),
+            Command::Coordinate(x, y, _) => rot_point(x, y),
             Command::Slot {
                 from_x,
                 from_y,
@@ -137,8 +196,8 @@ fn rotate_excellon_coordinates(e: &mut ExcellonLayerData, rot: i32) {
                 to_y,
                 ..
             } => {
-                rot_pair(from_x, from_y);
-                rot_pair(to_x, to_y);
+                rot_point(from_x, from_y);
+                rot_point(to_x, to_y);
             }
             _ => {}
         }
@@ -341,16 +400,8 @@ impl LayerCorners for ExcellonLayerData {
         };
         // Drill diameter (mm) of the currently selected tool.
         let mut radius = 0.0;
+        // Coordinates are absolute after load (see `resolve_absolute_coordinates`).
         let mut current = Pos::default();
-        let mut incremental = self
-            .header
-            .iter()
-            .rev()
-            .find_map(|x| match x {
-                Ok(Command::Incremental(i)) => Some(*i),
-                _ => None,
-            })
-            .unwrap_or(false);
 
         for command in self.commands.iter().flatten() {
             match command {
@@ -361,19 +412,9 @@ impl LayerCorners for ExcellonLayerData {
                         .map(|d| d.to_mm(&self.unit.unit) / 2.0)
                         .unwrap_or(0.0);
                 }
-                Command::Geometric(GeometricCode::InputMode(im)) => {
-                    incremental = *im == InputMode::Incremental;
-                }
                 Command::Coordinate(x, y, fmt) => {
-                    let cx = x.map(|v| v.to_mm(&fmt.unit));
-                    let cy = y.map(|v| v.to_mm(&fmt.unit));
-                    if incremental {
-                        current.x += cx.unwrap_or(0.0);
-                        current.y += cy.unwrap_or(0.0);
-                    } else {
-                        current.x = cx.unwrap_or(current.x);
-                        current.y = cy.unwrap_or(current.y);
-                    }
+                    current.x = x.map(|v| v.to_mm(&fmt.unit)).unwrap_or(current.x);
+                    current.y = y.map(|v| v.to_mm(&fmt.unit)).unwrap_or(current.y);
                     min.x = min.x.min(current.x - radius);
                     min.y = min.y.min(current.y - radius);
                     max.x = max.x.max(current.x + radius);
@@ -761,6 +802,10 @@ fn parse_fmat(tail: &str) -> Result<LineResult, ExcellonError> {
 }
 
 fn parse_ici(tail: &str) -> Result<LineResult, ExcellonError> {
+    // A bare `ICI` (no option) means incremental input is on.
+    if tail.trim().is_empty() {
+        return Ok(LineResult::Command(Command::Incremental(true)));
+    }
     let opts = preceded(',', alt(("ON", "OFF")));
     match run(tail, opts) {
         Ok("ON") => Ok(LineResult::Command(Command::Incremental(true))),
@@ -1070,7 +1115,8 @@ where
     } else {
         return Err(ExcellonError::MissingHeaderEnd.into());
     }
-    let commands = commands.into_iter().skip(header.len()).collect::<Vec<_>>();
+    let mut commands = commands.into_iter().skip(header.len()).collect::<Vec<_>>();
+    resolve_absolute_coordinates(&mut header, &mut commands);
     let format = header
         .iter()
         .find_map(|cmd| match cmd {
@@ -1336,6 +1382,58 @@ mod tests {
         assert_eq!(fmt.serialize(-12.34), "-12.34");
         assert_eq!(fmt.parse_num("12340")?, 12.34); // TZ-suppressed input
         assert_eq!(fmt.parse_num("-12340")?, -12.34);
+        Ok(())
+    }
+
+    fn coords(data: &ExcellonLayerData) -> Vec<(Option<f64>, Option<f64>)> {
+        data.commands
+            .iter()
+            .filter_map(|c| match c {
+                Ok(Command::Coordinate(x, y, _)) => Some((*x, *y)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_coords(actual: &[(Option<f64>, Option<f64>)], expected: &[(f64, f64)]) {
+        assert_eq!(actual.len(), expected.len(), "{actual:?} vs {expected:?}");
+        for (a, e) in actual.iter().zip(expected) {
+            let (Some(ax), Some(ay)) = *a else {
+                panic!("axis left out: {actual:?}");
+            };
+            assert!(
+                (ax - e.0).abs() < 1e-9 && (ay - e.1).abs() < 1e-9,
+                "{actual:?} vs {expected:?}"
+            );
+        }
+    }
+
+    /// An omitted axis is modal in absolute mode; rotating must fill it from the
+    /// current point and write both axes.
+    #[test]
+    fn test_rotate_fills_modal_axis() -> Result<(), Box<dyn std::error::Error>> {
+        let raw = "M48\nMETRIC\nT01C0.6\n%\nG05\nT01\nX1.0Y2.0\nX3.0\nY4.0\nM30\n";
+        let mut data = parse_excellon(BufReader::new(Cursor::new(raw)))?;
+        data.rebase(1, &Pos { x: 0.0, y: 0.0 });
+        assert_coords(&coords(&data), &[(2.0, -1.0), (2.0, -3.0), (4.0, -3.0)]);
+        Ok(())
+    }
+
+    /// Incremental programs are resolved to absolute on load, so translating
+    /// and rotating them treats every point the same way.
+    #[test]
+    fn test_incremental_resolved_on_load() -> Result<(), Box<dyn std::error::Error>> {
+        let raw = "M48\nMETRIC\nICI\nT01C0.6\n%\nG05\nT01\nX1.0\nX3.0Y1.0\nG90\nX0.5\nM30\n";
+        let mut data = parse_excellon(BufReader::new(Cursor::new(raw)))?;
+        assert_coords(&coords(&data), &[(1.0, 0.0), (4.0, 1.0), (0.5, 1.0)]);
+        assert!(
+            !data
+                .header
+                .iter()
+                .any(|c| matches!(c, Ok(Command::Incremental(true))))
+        );
+        data.transform(&Pos { x: 10.0, y: 5.0 });
+        assert_coords(&coords(&data), &[(11.0, 5.0), (14.0, 6.0), (10.5, 6.0)]);
         Ok(())
     }
 }
