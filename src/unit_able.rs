@@ -81,18 +81,33 @@ impl UnitAble for Size {
     }
 }
 
+/// Scales a length-valued macro parameter.
+///
+/// Literals are converted directly. A variable or expression cannot be
+/// evaluated here (its value comes from the aperture definition), so it is
+/// wrapped in a Gerber arithmetic expression at the point of use, e.g. `$1x25.4`.
+/// Variable definitions (`$n=...`) are never scaled: a variable may feed both a
+/// length and a rotation.
+fn scale_macro_decimal(dec: &MacroDecimal, factor: f64, op: &str) -> MacroDecimal {
+    match dec {
+        MacroDecimal::Value(v) => MacroDecimal::Value(v * factor),
+        MacroDecimal::Variable(n) => MacroDecimal::Expression(format!("${n}{op}")),
+        MacroDecimal::Expression(e) => MacroDecimal::Expression(format!("({e}){op}")),
+    }
+}
+
 impl UnitAble for MacroDecimal {
     fn mm_to_unit(&self, unit: &Unit) -> Self {
-        match self {
-            MacroDecimal::Value(v) => MacroDecimal::Value(v.mm_to_unit(unit)),
-            dec => dec.clone(),
+        match unit {
+            Unit::Millimeters => self.clone(),
+            Unit::Inches => scale_macro_decimal(self, 1.0 / 25.4, "/25.4"),
         }
     }
 
     fn to_mm(&self, unit: &Unit) -> Self {
-        match self {
-            MacroDecimal::Value(v) => MacroDecimal::Value(v.to_mm(unit)),
-            dec => dec.clone(),
+        match unit {
+            Unit::Millimeters => self.clone(),
+            Unit::Inches => scale_macro_decimal(self, 25.4, "x25.4"),
         }
     }
 }
@@ -149,7 +164,7 @@ impl UnitAble for MacroContent {
                 t.center = t.center.mm_to_unit(unit);
                 t.gap = t.gap.mm_to_unit(unit);
                 t.inner_diameter = t.inner_diameter.mm_to_unit(unit);
-                t.outer_diameter.mm_to_unit(unit);
+                t.outer_diameter = t.outer_diameter.mm_to_unit(unit);
             }
             MacroContent::VariableDefinition(_) => {}
             MacroContent::Comment(_) => {}
@@ -192,7 +207,7 @@ impl UnitAble for MacroContent {
                 t.center = t.center.to_mm(unit);
                 t.gap = t.gap.to_mm(unit);
                 t.inner_diameter = t.inner_diameter.to_mm(unit);
-                t.outer_diameter.to_mm(unit);
+                t.outer_diameter = t.outer_diameter.to_mm(unit);
             }
             MacroContent::VariableDefinition(_) | MacroContent::Comment(_) => {}
         }
@@ -210,7 +225,7 @@ impl UnitAble for Aperture {
             }
             Aperture::Obround(rect) | Aperture::Rectangle(rect) => {
                 rect.x = rect.x.mm_to_unit(unit);
-                rect.x = rect.y.mm_to_unit(unit);
+                rect.y = rect.y.mm_to_unit(unit);
                 rect.hole_diameter = rect.hole_diameter.mm_to_unit(unit);
             }
             Aperture::Polygon(poly) => {
@@ -233,7 +248,7 @@ impl UnitAble for Aperture {
             }
             Aperture::Obround(rect) | Aperture::Rectangle(rect) => {
                 rect.x = rect.x.to_mm(unit);
-                rect.x = rect.y.to_mm(unit);
+                rect.y = rect.y.to_mm(unit);
                 rect.hole_diameter = rect.hole_diameter.to_mm(unit);
             }
             Aperture::Polygon(poly) => {

@@ -204,24 +204,7 @@ impl GerberLayerData {
         }
 
         for aperture in self.apertures.values_mut() {
-            match aperture {
-                Aperture::Circle(circle) => {
-                    circle.diameter.convert_unit_self(&self.unit, unit);
-                    circle.hole_diameter.convert_unit_self(&self.unit, unit);
-                }
-                Aperture::Obround(rect) | Aperture::Rectangle(rect) => {
-                    rect.x.convert_unit_self(&self.unit, unit);
-                    rect.y.convert_unit_self(&self.unit, unit);
-                    rect.hole_diameter.convert_unit_self(&self.unit, unit);
-                }
-                Aperture::Polygon(poly) => {
-                    poly.diameter.convert_unit_self(&self.unit, unit);
-                    poly.hole_diameter.convert_unit_self(&self.unit, unit);
-                }
-                // TODO: whatever we need to do here.
-                Aperture::Macro(_, Some(_)) => {}
-                Aperture::Macro(_, None) => {}
-            };
+            aperture.convert_unit_self(&self.unit, unit);
         }
 
         self.macros.values_mut().for_each(|contents| {
@@ -970,6 +953,7 @@ impl Optimize for Command {
 mod tests {
     use super::*;
     use crate::Size;
+    use gerber_parser::gerber_types::MacroDecimal;
     use std::fs::File;
 
     #[test]
@@ -1240,6 +1224,65 @@ M02*
             &resolved_points(&layer),
             &[(1.0, 1.0), (3.0, 1.0), (3.0, 4.0)],
         );
+        Ok(())
+    }
+
+    /// An inch file is converted to mm on load: rectangle sizes, thermal
+    /// diameters and macro lengths that use `$n` variables or expressions all
+    /// scale, and writing + reloading the mm result does not scale twice.
+    #[test]
+    fn test_inch_apertures_and_macros_to_mm() -> Result<(), Box<dyn std::error::Error>> {
+        let gbr = "\
+%FSLAX26Y26*%
+%MOIN*%
+%AMBOX*
+21,1,$1,$2,0,0,$3*
+1,1,$1+0.01,0,0*
+7,0,0,0.1,0.08,0.01,0*%
+%ADD10R,0.1X0.05*%
+%ADD11BOX,0.2X0.1X45*%
+D10*
+X100000Y100000D03*
+D11*
+X200000Y200000D03*
+M02*
+";
+        let layer = GerberLayerData::from_type(LayerType::Top, BufReader::new(gbr.as_bytes()))?;
+        let Some(Aperture::Rectangle(r)) = layer.apertures.get(&10) else {
+            panic!("D10 is not a rectangle");
+        };
+        assert!(
+            (r.x - 2.54).abs() < 1e-9 && (r.y - 1.27).abs() < 1e-9,
+            "{r:?}"
+        );
+
+        let body = &layer.macros["BOX"];
+        let MacroContent::CenterLine(cl) = &body[0] else {
+            panic!("expected center line: {body:?}")
+        };
+        assert_eq!(cl.dimensions.0, MacroDecimal::Expression("$1x25.4".into()));
+        // The rotation parameter ($3) is not a length and stays unscaled.
+        assert_eq!(cl.angle, MacroDecimal::Variable(3));
+        let MacroContent::Circle(c) = &body[1] else {
+            panic!("expected circle: {body:?}")
+        };
+        assert_eq!(
+            c.diameter,
+            MacroDecimal::Expression("($1+0.01)x25.4".into())
+        );
+        let MacroContent::Thermal(t) = &body[2] else {
+            panic!("expected thermal: {body:?}")
+        };
+        assert_eq!(t.outer_diameter, MacroDecimal::Value(0.1 * 25.4));
+
+        // mm file written and parsed again: unchanged.
+        let mut out = BufWriter::new(Vec::new());
+        layer.write_to(&mut out)?;
+        let written = out.into_inner()?;
+        let reloaded =
+            GerberLayerData::from_type(LayerType::Top, BufReader::new(written.as_slice()))?;
+        assert_eq!(reloaded.macros["BOX"], layer.macros["BOX"]);
+        assert_eq!(reloaded.apertures.get(&10), layer.apertures.get(&10));
         Ok(())
     }
 }
