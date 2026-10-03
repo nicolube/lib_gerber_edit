@@ -14,7 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose `LayerDiagnostics` (parse errors, flatten issues) are not complete
   fails with `WriteError::Incomplete` unless `WriteOptions::allow_incomplete`
   is set; all checks run before any file is opened (`Board::check_write`).
-- `LayerDiagnostics`, `Layer::diagnostics`, `Board::diagnostics`.
+- `LayerDiagnostics`, `Layer::diagnostics`, `Board::diagnostics`,
+  `Layer::unresolved_edit` and `Board::unresolved_edits` (what a save would
+  refuse, for a confirmation dialog).
 - MIGRATING.md (0.6 → 0.7) and a "Supported spec features" table and
   flattening example in the README.
 - `flatten` module: `aperture_shapes` turns any aperture into polygons in mm,

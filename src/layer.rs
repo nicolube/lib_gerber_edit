@@ -119,16 +119,31 @@ impl Layer {
         if self.source.is_some() && !self.is_modified() {
             return Ok(WritePlan::Verbatim);
         }
-        if !options.allow_incomplete {
-            let diagnostics = self.diagnostics();
-            if !diagnostics.is_complete() {
-                return Err(WriteError::Incomplete {
-                    layer: self.name.clone(),
-                    diagnostics: Box::new(diagnostics),
-                });
-            }
+        if !options.allow_incomplete
+            && let Some(diagnostics) = self.incomplete_diagnostics()
+        {
+            return Err(WriteError::Incomplete {
+                layer: self.name.clone(),
+                diagnostics: Box::new(diagnostics),
+            });
         }
         Ok(WritePlan::Regenerate)
+    }
+
+    /// The diagnostics of an edited layer that is not fully understood:
+    /// exactly the layers [`write_to`](Self::write_to) refuses without
+    /// [`WriteOptions::allow_incomplete`]. `None` when the layer is
+    /// unedited or complete.
+    pub fn unresolved_edit(&self) -> Option<LayerDiagnostics> {
+        if !self.is_modified() {
+            return None;
+        }
+        self.incomplete_diagnostics()
+    }
+
+    fn incomplete_diagnostics(&self) -> Option<LayerDiagnostics> {
+        let diagnostics = self.diagnostics();
+        (!diagnostics.is_complete()).then_some(diagnostics)
     }
 
     pub(crate) fn write_planned<T: Write>(

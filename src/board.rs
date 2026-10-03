@@ -271,6 +271,15 @@ impl Board {
             .collect()
     }
 
+    /// Edited layers that would be refused without
+    /// [`WriteOptions::allow_incomplete`], with their diagnostics.
+    pub fn unresolved_edits(&self) -> Vec<(String, LayerDiagnostics)> {
+        self.0
+            .iter()
+            .filter_map(|layer| Some((layer.name.clone(), layer.unresolved_edit()?)))
+            .collect()
+    }
+
     /// Interpretation diagnostics of every layer, by layer name.
     pub fn diagnostics(&self) -> Vec<(String, LayerDiagnostics)> {
         self.0
@@ -602,6 +611,9 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, WriteError::Incomplete { .. }), "{err}");
         assert_eq!(opened, 0);
+        let unresolved = board.unresolved_edits();
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].1.parse_errors.len(), 1);
         let out = write_all(&board, &WriteOptions::default().allow_incomplete(true)).unwrap();
         assert!(!out[0].is_empty());
     }
