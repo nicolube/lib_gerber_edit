@@ -27,3 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Gerber files using incremental notation (`%FSLI…`) converted from inch to mm
   were marked absolute while the coordinates were still deltas.
 - A bare `ICI` Excellon header line (incremental on) was rejected as invalid.
+- Altium tool definitions with feed/speed before the diameter
+  (`T01F00S00C0.80`) failed to parse; selecting such a tool then aborted the
+  whole drill file. Tool parameters (`B`, `C`, `F`, `H`, `S`, `Z`) are now
+  accepted in any order and the diameter is kept.
+- `M16` (router retract with clamping) was rejected; it now lifts the router
+  like `M17` (written back as `M17`).
+- `R<n>X..Y..` repeat codes were rejected; they are now expanded into `n`
+  drill hits offset from the previous one.

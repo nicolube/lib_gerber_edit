@@ -5,16 +5,16 @@ use crate::{
 };
 use derive_more::{Display, Error};
 use gerber_parser::gerber_types::Unit;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Display, Formatter};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::num::{ParseFloatError, ParseIntError};
 use winnow::ModalResult;
 use winnow::Parser;
 use winnow::ascii::{digit1, float};
-use winnow::combinator::{alt, opt, preceded};
+use winnow::combinator::{alt, opt, preceded, repeat};
 use winnow::error::ContextError;
-use winnow::token::take;
+use winnow::token::{one_of, rest, take};
 
 /// A parsed Excellon drill file, split into header and body sections.
 ///
@@ -119,12 +119,13 @@ impl LayerTransform for ExcellonLayerData {
 /// Rewrites a drill program to absolute coordinates with both axes written.
 ///
 /// Incremental programs (`ICI` header, `G91`) are resolved and switched to
-/// absolute, and omitted (modal) axes are filled from the current point. After
-/// this, transforms, merges and bounds never depend on the input mode or on
-/// earlier commands.
+/// absolute, and omitted (modal) axes are filled from the current point.
+/// Coordinates at `repeat_steps` (expanded `R` codes) are deltas in any mode.
+/// After this, transforms, merges and bounds never depend on the input mode or
+/// on earlier commands.
 fn resolve_absolute_coordinates(
-    header: &mut [Result<Command, ExcellonParseFormat>],
     commands: &mut [Result<Command, ExcellonParseFormat>],
+    repeat_steps: &HashSet<usize>,
 ) {
     let mut incremental = false;
     // Current point in mm, so unit switches (M71/M72) between commands stay exact.
@@ -139,11 +140,8 @@ fn resolve_absolute_coordinates(
         *x = Some(current.0.mm_to_unit(unit));
         *y = Some(current.1.mm_to_unit(unit));
     };
-    for cmd in header
-        .iter_mut()
-        .chain(commands.iter_mut())
-        .filter_map(|c| c.as_mut().ok())
-    {
+    for (index, cmd) in commands.iter_mut().enumerate() {
+        let Ok(cmd) = cmd else { continue };
         match cmd {
             Command::Incremental(i) => {
                 incremental = *i;
@@ -153,7 +151,12 @@ fn resolve_absolute_coordinates(
                 incremental = *m == InputMode::Incremental;
                 *m = InputMode::Absolute;
             }
-            Command::Coordinate(x, y, fmt) => resolve(x, y, &fmt.unit, incremental),
+            Command::Coordinate(x, y, fmt) => resolve(
+                x,
+                y,
+                &fmt.unit,
+                incremental || repeat_steps.contains(&index),
+            ),
             Command::Slot {
                 from_x,
                 from_y,
@@ -783,6 +786,8 @@ impl Display for MachineCode {
 enum LineResult {
     Command(Command),
     RawCoordinate(Option<f64>, Option<f64>),
+    /// `R<n>X<dx>Y<dy>`: repeat the last hit `n` times, each offset by `(dx, dy)`.
+    Repeat(u32, Option<f64>, Option<f64>),
 }
 
 fn run<'i, T, P>(input: &'i str, mut parser: P) -> Result<T, ()>
@@ -852,7 +857,9 @@ fn parse_machine(tail: &str, line: &str) -> Result<LineResult, ExcellonError> {
         .map_err(|_| ExcellonError::InvalidCmd(line.to_string()))?;
     let mc = match code {
         15 => MachineCode::RouterDown,
-        17 => MachineCode::RouterUp,
+        // M16 (retract with clamping) and M17 (retract without) both lift the
+        // router; neither draws further route segments.
+        16 | 17 => MachineCode::RouterUp,
         30 => MachineCode::EndOfProgram,
         48 => MachineCode::HeaderStart,
         71 => MachineCode::Scale(Unit::Millimeters),
@@ -864,20 +871,33 @@ fn parse_machine(tail: &str, line: &str) -> Result<LineResult, ExcellonError> {
 }
 
 fn parse_tool(tail: &str, line: &str) -> Result<LineResult, ExcellonError> {
+    // `T<n>` selects a tool. A definition carries parameters in any order, e.g.
+    // `T1C0.8` (KiCad) or `T01F00S00C0.8` (Altium: feed, speed, diameter);
+    // only the diameter `C` is kept.
+    let param = (one_of(['B', 'C', 'F', 'H', 'S', 'Z']), float::<_, f64, _>);
     let parser = (
         digit1.parse_to::<u32>(),
-        opt(preceded('C', float::<_, f64, _>)),
+        repeat::<_, _, Vec<_>, _, _>(0.., param),
     );
     match run(tail, parser) {
-        Ok((tool_number, Some(diameter))) => Ok(LineResult::Command(Command::ToolDefinition(
-            ToolDefinition {
-                tool_number,
-                diameter,
+        Ok((tool_number, params)) => Ok(LineResult::Command(
+            match params.iter().find(|(p, _)| *p == 'C') {
+                Some((_, diameter)) => Command::ToolDefinition(ToolDefinition {
+                    tool_number,
+                    diameter: *diameter,
+                }),
+                None => Command::Tool(tool_number),
             },
-        ))),
-        Ok((tool_number, None)) => Ok(LineResult::Command(Command::Tool(tool_number))),
+        )),
         Err(_) => Err(ExcellonError::InvalidToolDefinition(line.to_string())),
     }
+}
+
+fn parse_repeat(tail: &str, line: &str, fmt: &UnitDefinition) -> Result<LineResult, ExcellonError> {
+    let (count, offset) = run(tail, (digit1.parse_to::<u32>(), rest))
+        .map_err(|_| ExcellonError::InvalidCmd(line.to_string()))?;
+    let (dx, dy) = parse_xy(offset, fmt)?;
+    Ok(LineResult::Repeat(count, dx, dy))
 }
 
 fn parse_geometric(tail: &str, line: &str) -> Result<LineResult, ExcellonError> {
@@ -1001,6 +1021,9 @@ fn parse_line(line: &str, fmt: &UnitDefinition) -> Result<Vec<LineResult>, Excel
     if let Some(tail) = line.strip_prefix('T') {
         return Ok(vec![parse_tool(tail, line)?]);
     }
+    if let Some(tail) = line.strip_prefix('R') {
+        return Ok(vec![parse_repeat(tail, line, fmt)?]);
+    }
     if let Some(tail) = line.strip_prefix('F') {
         return Ok(vec![parse_feed(tail, line)?]);
     }
@@ -1025,6 +1048,9 @@ where
     let mut buf = String::new();
     let mut line_number = 0;
     let mut tools = HashMap::new();
+    // Indices of coordinates expanded from `R` repeat codes; they are deltas
+    // from the previous hit regardless of the input mode.
+    let mut repeat_steps = HashSet::new();
     while reader.read_line(&mut buf)? > 0 {
         let trimmed = buf.trim();
         if trimmed.is_empty() {
@@ -1038,6 +1064,21 @@ where
             Ok(results) => {
                 for result in results {
                     let cmd_result = match result {
+                        LineResult::Repeat(count, dx, dy) => {
+                            if !unit_set {
+                                commands.push(Err(ExcellonParseFormat {
+                                    source: ExcellonError::CoordinateBeforeUnit,
+                                    line: line_number,
+                                    content: trimmed.to_string(),
+                                }));
+                                continue;
+                            }
+                            for _ in 0..count {
+                                repeat_steps.insert(commands.len());
+                                commands.push(Ok(Command::Coordinate(dx, dy, format.clone())));
+                            }
+                            continue;
+                        }
                         LineResult::Command(cmd) => {
                             match &cmd {
                                 Command::UnitDefinition(unit) => {
@@ -1099,6 +1140,7 @@ where
     ) {
         return Err(ExcellonError::MissingEndOfProgram.into());
     }
+    resolve_absolute_coordinates(&mut commands, &repeat_steps);
     let mut header = commands
         .iter()
         .take_while(|cmd| {
@@ -1115,8 +1157,7 @@ where
     } else {
         return Err(ExcellonError::MissingHeaderEnd.into());
     }
-    let mut commands = commands.into_iter().skip(header.len()).collect::<Vec<_>>();
-    resolve_absolute_coordinates(&mut header, &mut commands);
+    let commands = commands.into_iter().skip(header.len()).collect::<Vec<_>>();
     let format = header
         .iter()
         .find_map(|cmd| match cmd {
@@ -1434,6 +1475,50 @@ mod tests {
         );
         data.transform(&Pos { x: 10.0, y: 5.0 });
         assert_coords(&coords(&data), &[(11.0, 5.0), (14.0, 6.0), (10.5, 6.0)]);
+        Ok(())
+    }
+
+    /// Altium writes tool definitions with feed and speed before the diameter.
+    #[test]
+    fn test_altium_tool_definition() -> Result<(), Box<dyn std::error::Error>> {
+        let raw = "M48\nMETRIC,LZ,000.000\nT01F00S00C0.80\nT02C1.2F100\n%\nG05\nT01\nX1.0Y1.0\nT02\nX2.0Y2.0\nM30\n";
+        let data = parse_excellon(BufReader::new(Cursor::new(raw)))?;
+        assert_eq!(data.tools.get(&1), Some(&0.8));
+        assert_eq!(data.tools.get(&2), Some(&1.2));
+        for cmd in data.header.iter().chain(&data.commands) {
+            cmd.clone()?;
+        }
+        Ok(())
+    }
+
+    /// M16 (retract with clamping) lifts the router like M17.
+    #[test]
+    fn test_m16_router_up() -> Result<(), Box<dyn std::error::Error>> {
+        let raw = "M48\nMETRIC\nT01C0.6\n%\nT01\nG00X1.0Y1.0\nM15\nG01X2.0\nM16\nG05\nM30\n";
+        let data = parse_excellon(BufReader::new(Cursor::new(raw)))?;
+        assert!(
+            data.commands
+                .iter()
+                .any(|c| matches!(c, Ok(Command::Machine(MachineCode::RouterUp))))
+        );
+        for cmd in &data.commands {
+            cmd.clone()?;
+        }
+        Ok(())
+    }
+
+    /// `R<n>X<dx>Y<dy>` repeats the previous hit n times with an offset.
+    #[test]
+    fn test_repeat_code() -> Result<(), Box<dyn std::error::Error>> {
+        let raw = "M48\nMETRIC\nT01C0.6\n%\nG05\nT01\nX1.0Y1.0\nR3X0.5\nX10.0Y10.0\nM30\n";
+        let data = parse_excellon(BufReader::new(Cursor::new(raw)))?;
+        for cmd in &data.commands {
+            cmd.clone()?;
+        }
+        assert_coords(
+            &coords(&data),
+            &[(1.0, 1.0), (1.5, 1.0), (2.0, 1.0), (2.5, 1.0), (10.0, 10.0)],
+        );
         Ok(())
     }
 }
