@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `examples/panelize.rs`: `cargo run --example panelize -- <in> <out> [nx] [ny] [gap_mm]`.
+
 ### Changed
+- README examples compile again (`Board::from_folder` returns `LoadResult`
+  since 0.3) and run as doctests against `test/mobo`; the dependency line
+  shows the current version.
 - Coordinates are normalised on load: every Gerber operation and Excellon
   drill/slot coordinate is stored as an absolute value with both axes written.
   Incremental input (`%FSLI…`, `ICI`, `G91`) is resolved and switched to

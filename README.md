@@ -7,7 +7,7 @@ All lengths in the public API are in **millimetres**.
 
 ```toml
 [dependencies]
-lib_gerber_edit = "0.2"
+lib_gerber_edit = "0.6"
 ```
 
 ---
@@ -34,14 +34,22 @@ use lib_gerber_edit::board::Board;
 use lib_gerber_edit::{LayerCorners, LayerMerge, LayerTransform, Pos};
 use std::path::Path;
 
-let mut board = Board::from_folder(Path::new("gerbers/")).unwrap();
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let loaded = Board::from_folder(Path::new("test/mobo"))?;
+for (file, err) in &loaded.errors {
+    eprintln!("skipped {file}: {err}");
+}
+let mut board = loaded.board;
 let size = board.get_size();
 
 let mut copy = board.clone();
 copy.transform(&Pos { x: size.width + 2.0, y: 0.0 }); // 2 mm gap
 
 board.merge(&copy);
-board.write_to_folder(Path::new("output/")).unwrap();
+# let out = std::env::temp_dir().join("lib_gerber_edit-readme-panel");
+board.write_to_folder(&out)?;
+# Ok(())
+# }
 ```
 
 ### Render text onto a silkscreen layer
@@ -53,6 +61,7 @@ use lib_gerber_edit::layer::{Layer, LayerType};
 use lib_gerber_edit::{LayerTransform, Pos};
 use std::path::Path;
 
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
 // Build a reusable format: 3 mm tall, centred on the origin.
 let fmt = AsciiText::new(3.0)
     .h_align(HAlign::Center)
@@ -61,13 +70,16 @@ let fmt = AsciiText::new(3.0)
 // Produce two layers from the same format object.
 let rev_layer = fmt.build("Rev 1.0", LayerType::SilkScreenTop);
 
-let mut board = Board::from_folder(Path::new("gerbers/")).unwrap();
+let mut board = Board::from_folder(Path::new("test/mobo"))?.board;
 board.add_layer(Layer {
     ty: LayerType::SilkScreenTop,
     name: "board.gto".to_string(),
     data: rev_layer.into(),
 });
-board.write_to_folder(Path::new("output/")).unwrap();
+# let out = std::env::temp_dir().join("lib_gerber_edit-readme-text");
+board.write_to_folder(&out)?;
+# Ok(())
+# }
 ```
 
 ---
@@ -89,7 +101,7 @@ All traits are implemented for `Board`, `GerberLayerData`, `ExcellonLayerData`, 
 
 ### `Board`
 
-```rust
+```text
 Board::from_folder(path)          // load all recognised layers from a directory
 Board::load(vec![("name.gbr", reader), ...]) // load from in-memory readers
 board.add_layer(layer)            // merge if type exists, insert otherwise
@@ -99,7 +111,7 @@ board.write_to_folder(path)       // write all layers back to disk
 
 ### `GerberLayerData`
 
-```rust
+```text
 GerberLayerData::empty(layer_type)          // blank layer ready for commands
 GerberLayerData::from_type(ty, reader)      // parse with explicit type
 GerberLayerData::from_commands(reader)      // infer type from FileAttribute
@@ -108,7 +120,7 @@ layer.write_to(&mut writer)                 // serialise to RS-274X
 
 ### `AsciiText`
 
-```rust
+```text
 AsciiText::new(size_mm)           // character height in mm
     .ratio(0.8)                   // line thickness as fraction of size (default 1.0)
     .h_align(HAlign::Center)      // Left (default) | Center | Right
@@ -141,6 +153,8 @@ The origin `(0, 0)` of the returned layer corresponds to the chosen alignment an
 ## Notes
 
 - Tested primarily with output from **KiCad** and **Autodesk Eagle**.
+- Depend on `lib_gerber_edit::gerber_types` (re-exported) rather than on
+  `gerber-types` directly, so your types always match the ones this crate uses.
 - Arc bounding boxes follow RS-274X §5.3 (multi-quadrant G75). Single-quadrant G74 arcs may have imprecise bounding boxes.
 - The library is functional but still evolving — contributions welcome.
 
