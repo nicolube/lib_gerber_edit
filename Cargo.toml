@@ -3,7 +3,7 @@ name = "lib_gerber_edit"
 description = "A library for manipulating extended Gerber (RS-274X) and Excellon drill data"
 repository = "https://github.com/nicolube/lib_gerber_edit"
 license-file = "LICENSE"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2024"
 
 [dependencies]
