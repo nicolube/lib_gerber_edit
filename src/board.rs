@@ -4,6 +4,7 @@ use crate::layer::{Layer, LayerData, LayerType};
 use crate::{LayerCorners, LayerMerge, LayerRotate, LayerTransform, Pos, error, excellon_format};
 use gerber_parser::gerber_types::{Command, CommentContent, FunctionCode, GCode, GerberResult};
 use log::{debug, warn};
+use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -238,7 +239,8 @@ impl Board {
     ///
     /// `f` is called once per layer and must return an open `BufWriter`.
     /// Use [`write_to_folder`](Self::write_to_folder) for the common case of
-    /// writing files to a directory.
+    /// writing files to a directory. Fails before calling `f` at all if two
+    /// layers share a name or a name is not a plain file name.
     pub fn write_to<T>(
         &self,
         f: &mut impl FnMut(&Layer) -> std::io::Result<BufWriter<T>>,
@@ -246,6 +248,7 @@ impl Board {
     where
         T: Write,
     {
+        self.check_names()?;
         for layer in &self.0 {
             let mut writer = f(layer)?;
             layer.data.write_to(&mut writer)?;
@@ -255,14 +258,64 @@ impl Board {
 
     /// Writes all layers to `path`, creating the directory if necessary.
     ///
-    /// Each layer is written to a file named `layer.name` inside `path`.
+    /// Each layer is written to a file named `layer.name` inside `path`. Files
+    /// are first written to temporary names and only renamed into place once
+    /// every layer was written successfully, so a write failure leaves
+    /// existing files untouched (the renames themselves are not atomic as a
+    /// group).
     pub fn write_to_folder(&self, path: &Path) -> GerberResult<()> {
         fs::create_dir_all(path)?;
-        let mut name_fn = |x: &Layer| {
-            let file_path = path.join(&x.name);
-            Ok(BufWriter::new(File::create(file_path)?))
-        };
-        self.write_to(&mut name_fn)
+        let paths: Vec<(PathBuf, PathBuf)> = self
+            .0
+            .iter()
+            .map(|layer| {
+                let tmp = format!(".{}.{}.tmp", layer.name, std::process::id());
+                (path.join(tmp), path.join(&layer.name))
+            })
+            .collect();
+        let mut index = 0;
+        let result = self
+            .write_to(&mut |_: &Layer| {
+                let file = File::create(&paths[index].0);
+                index += 1;
+                Ok(BufWriter::new(file?))
+            })
+            .and_then(|()| {
+                for (tmp, target) in &paths {
+                    fs::rename(tmp, target)?;
+                }
+                Ok(())
+            });
+        if result.is_err() {
+            for (tmp, _) in &paths {
+                let _ = fs::remove_file(tmp);
+            }
+        }
+        result
+    }
+
+    /// Layer names become file names: they must be unique and must not
+    /// contain path separators.
+    fn check_names(&self) -> io::Result<()> {
+        let mut seen = HashSet::new();
+        for layer in &self.0 {
+            let name = layer.name.as_str();
+            if name.is_empty() || name.contains(['/', '\\']) || name == ".." {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("layer name '{name}' is not a plain file name; rename the layer"),
+                ));
+            }
+            if !seen.insert(name) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "two layers are named '{name}'; writing both would overwrite one; rename one of them"
+                    ),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -386,5 +439,76 @@ impl LayerMerge for Board {
                 layer.data.merge(&other.data)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gerber::GerberLayerData;
+
+    fn layer(name: &str) -> Layer {
+        let mut layer = Layer::from(GerberLayerData::empty(LayerType::Top));
+        layer.name = name.to_string();
+        layer
+    }
+
+    /// Two layers with the same name would overwrite each other; nothing may
+    /// be written.
+    #[test]
+    fn test_write_rejects_duplicate_names() {
+        let board = Board(vec![layer("a.gbr"), layer("a.gbr")]);
+        let mut opened = 0;
+        let result = board.write_to(&mut |_| {
+            opened += 1;
+            Ok(BufWriter::new(Vec::new()))
+        });
+        assert!(result.is_err());
+        assert_eq!(opened, 0);
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("disk full"))
+        }
+    }
+
+    /// Layer names become file names and must not escape the output folder.
+    #[test]
+    fn test_write_rejects_path_names() {
+        let board = Board(vec![layer("../evil.gbr")]);
+        assert!(
+            board
+                .write_to(&mut |_| Ok(BufWriter::new(Vec::new())))
+                .is_err()
+        );
+    }
+
+    /// A failure when buffered bytes are finally written must be reported.
+    #[test]
+    fn test_write_propagates_flush_error() {
+        let board = Board(vec![layer("a.gbr")]);
+        let result = board.write_to(&mut |_| Ok(BufWriter::new(FailingWriter)));
+        assert!(result.is_err());
+    }
+
+    /// A successful folder write leaves no temporary files behind.
+    #[test]
+    fn test_write_to_folder_renames_temp_files() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!("lge-write-{}", std::process::id()));
+        let board = Board(vec![layer("a.gbr"), layer("b.gbr")]);
+        board.write_to_folder(&dir)?;
+        let mut names: Vec<_> = fs::read_dir(&dir)?
+            .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect::<Result<_, _>>()?;
+        names.sort();
+        fs::remove_dir_all(&dir)?;
+        assert_eq!(names, vec!["a.gbr", "b.gbr"]);
+        Ok(())
     }
 }

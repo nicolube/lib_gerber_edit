@@ -16,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where the source omitted an unchanged one.
 
 ### Fixed
+- Excellon and info layers were never flushed explicitly, so a write error on
+  the final buffered bytes was silently lost. Every layer write now flushes and
+  reports the error.
+- `Board::write_to` / `write_to_folder` now reject duplicate layer names
+  (one file would silently overwrite the other) and names containing path
+  separators, before anything is written.
+- `Board::write_to_folder` writes to temporary files and renames them into
+  place only after every layer was written, so a failed save no longer leaves
+  a half-written set of files.
 - Rotating a Gerber layer no longer corrupts operations that omit an unchanged
   axis (e.g. `X3000000D01*` after `X1000000Y2000000D02*`, common in Altium and
   Eagle output). The omitted axis was treated as 0 and only the axes present

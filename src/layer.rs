@@ -81,6 +81,8 @@ impl LayerData {
             LayerData::Excellon(e) => e.write_to(writer)?,
             LayerData::Info(s) => writer.write_all(s.to_string().as_bytes())?,
         }
+        // Surface buffered write errors here instead of losing them on drop.
+        writer.flush()?;
         Ok(())
     }
 
