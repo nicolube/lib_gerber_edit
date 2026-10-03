@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      # Includes the README examples as doctests.
+      - run: cargo test --all-features
+      - run: cargo test --no-default-features
+
+  examples:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run --release --example panelize -- test/mobo "$RUNNER_TEMP/panel" 2 1 2.0
+      - run: cargo run --release --example render -- test/mobo "$RUNNER_TEMP/mobo.png" 10
+      - uses: actions/upload-artifact@v4
+        with:
+          name: render
+          path: ${{ runner.temp }}/mobo.png
+
+  semver:
+    # A 0.x minor bump may break the API; a patch release may not.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: obi1kenobi/cargo-semver-checks-action@v2

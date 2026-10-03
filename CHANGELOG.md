@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is set; all checks run before any file is opened (`Board::check_write`).
 - `Path::to_polyline(tolerance)` turns flattened paths (exact arcs) into
   points for renderers.
+- CI (GitHub Actions): fmt, clippy, tests incl. README doctests, the
+  panelize and render examples, and cargo-semver-checks.
 - `examples/render.rs`: renders a board folder to a PNG from the flattened
   layers (tiny-skia, dev-dependency only).
 - `LayerDiagnostics`, `Layer::diagnostics`, `Board::diagnostics`,
