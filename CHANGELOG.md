@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is set; all checks run before any file is opened (`Board::check_write`).
 - `Path::to_polyline(tolerance)` turns flattened paths (exact arcs) into
   points for renderers.
+- `fuzz/`: cargo-fuzz target that loads, flattens, writes and merges
+  arbitrary input; seeded from `test/mobo`.
 - CI (GitHub Actions): fmt, clippy, tests incl. README doctests, the
   panelize and render examples, and cargo-semver-checks.
 - `examples/render.rs`: renders a board folder to a PNG from the flattened
@@ -52,6 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `WriteError` (name problems are `InvalidName` / `DuplicateName`).
 - `Layer` has a private field; build layers with `Layer::new` or
   `Layer::parse`. New `LayerData::parse_bytes`.
+- `error::Error` and `ParseError` are `#[non_exhaustive]`.
 - `excellon_format::Command` and `ExcellonError` are `#[non_exhaustive]`;
   `Mode` is `Copy`.
 - `LayerMerge::merge`, `merge_from` and `Board::add_layer` return
@@ -67,6 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `get_corners` finds the real centre of single-quadrant (G74) arcs instead
   of adding the unsigned offsets.
 - Excellon arc lines (`G02X..Y..A..`) no longer fail to parse.
+- A panic inside gerber_parser on malformed input is reported as
+  `ParseError::ParserPanic` for that file instead of unwinding into the
+  caller (builds with `panic = "abort"` still abort; see the fuzz notes).
 - Gerber merge copies the merged layer's aperture macros (identical bodies
   reused, clashing names renamed to `<name>_<n>`), remaps aperture-block
   D-codes instead of panicking, resets polarity / quadrant / LM-LR-LS at

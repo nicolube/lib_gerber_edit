@@ -1,0 +1,24 @@
+[package]
+name = "lib_gerber_edit-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+lib_gerber_edit = { path = ".." }
+
+[[bin]]
+name = "load_flatten"
+path = "fuzz_targets/load_flatten.rs"
+test = false
+doc = false
+bench = false
+
+# Fuzz against the local gerber-parser fork, which carries fixes for panics
+# found here until they are released upstream.
+[patch.crates-io]
+gerber_parser = { path = "../../gerber-parser" }

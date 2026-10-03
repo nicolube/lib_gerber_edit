@@ -2,6 +2,7 @@ use gerber_parser::gerber_types::{FileFunction, GenerationSoftware};
 use std::io;
 
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum Error {
     #[error("Cannot determine layer type for file: '{0}'")]
     InvalidType(String),
@@ -12,11 +13,14 @@ pub enum Error {
 }
 
 #[derive(thiserror::Error, Debug)]
+#[non_exhaustive]
 pub enum ParseError {
     #[error("Failed to parse Gerber layer: {0}")]
     GerberParseError(#[from] gerber_parser::ParseError),
     #[error("Failed to parse an Excellon layer: {0}")]
     ExcellonParseError(io::Error),
+    #[error("the Gerber parser crashed on this file ({0}); please report it with the file")]
+    ParserPanic(String),
     #[error("Missing coordinate format specification in layer '{0}'")]
     FormatMissing(String),
 }

@@ -166,7 +166,13 @@ impl GerberLayerData {
         R: Read,
     {
         debug!("Parsing Gerber layer with type {:?}", ty);
-        let data = gerber_parser::parse(reader).map_err(|(_, err)| err)?;
+        // A parser panic on malformed input must not take the caller down;
+        // it becomes a parse error for this file (where panics unwind).
+        let data = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            gerber_parser::parse(reader).map_err(|(_, err)| Box::new(err))
+        }))
+        .map_err(|panic| ParseError::ParserPanic(panic_message(&*panic)))?
+        .map_err(|err| *err)?;
         Self::new(ty, data)
     }
 
@@ -373,6 +379,15 @@ impl GerberLayerData {
         writer.flush()?;
         Ok(())
     }
+}
+
+/// The message of a caught panic payload.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".to_string())
 }
 
 /// The file attribute in `command`, in either the `%TF` or the `G04 #@!`
@@ -1690,6 +1705,20 @@ M02*
         let ff = LayerType::SilkScreenTop.function();
         let out = written(&layer, &WriteOptions::default().file_function(Some(ff)));
         assert!(out.contains("TF.FileFunction,Legend,Top"), "{out}");
+    }
+
+    /// gerber_parser 0.5.0 (crates.io, which this crate builds against)
+    /// panics on a one-value `.GenerationSoftware`; the panic must come back
+    /// as an error, not unwind into the caller. Once a fixed parser is
+    /// released this input parses and the test needs another panicking one.
+    #[test]
+    fn test_parser_panic_is_an_error() {
+        let gbr = "%FSLAX46Y46*%\n%MOMM*%\n%TF.GenerationSoftware,KiCad*%\nM02*\n";
+        let result = GerberLayerData::from_type(LayerType::Top, BufReader::new(gbr.as_bytes()));
+        assert!(
+            matches!(result, Err(ParseError::ParserPanic(_))),
+            "{result:?}"
+        );
     }
 
     #[test]
