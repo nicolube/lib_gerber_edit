@@ -7,6 +7,7 @@
 //! evaluated once per aperture into polygons.
 
 mod aperture;
+mod excellon;
 mod expr;
 pub(crate) mod geom;
 mod gerber;

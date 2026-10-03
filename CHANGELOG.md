@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   G75), clear polarity, step-and-repeat and aperture blocks kept once as
   instanced definitions, aperture images per D-code, per-object issues and
   resource limits. `FlatLayer::iter_expanded` walks the expanded stream.
+- `ExcellonLayerData::flatten` / `flatten_with`: drill hits as flashes,
+  routed moves and G85 slots as strokes (router codes respected), one
+  circular aperture per tool. Circular routes are reported as an issue
+  until arc parameters are parsed.
 
 ### Fixed
 - `get_corners` finds the real centre of single-quadrant (G74) arcs instead

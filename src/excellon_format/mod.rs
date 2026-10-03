@@ -416,8 +416,7 @@ impl LayerCorners for ExcellonLayerData {
                         .unwrap_or(0.0);
                 }
                 Command::Coordinate(x, y, fmt) => {
-                    current.x = x.map(|v| v.to_mm(&fmt.unit)).unwrap_or(current.x);
-                    current.y = y.map(|v| v.to_mm(&fmt.unit)).unwrap_or(current.y);
+                    current = resolve_point(*x, *y, &fmt.unit, &current);
                     min.x = min.x.min(current.x - radius);
                     min.y = min.y.min(current.y - radius);
                     max.x = max.x.max(current.x + radius);
@@ -431,12 +430,8 @@ impl LayerCorners for ExcellonLayerData {
                     fmt,
                 } => {
                     // Both endpoints bound the milled slot; tool width expands it.
-                    let from = Pos {
-                        x: from_x.map(|v| v.to_mm(&fmt.unit)).unwrap_or(current.x),
-                        y: from_y.map(|v| v.to_mm(&fmt.unit)).unwrap_or(current.y),
-                    };
-                    current.x = to_x.map(|v| v.to_mm(&fmt.unit)).unwrap_or(current.x);
-                    current.y = to_y.map(|v| v.to_mm(&fmt.unit)).unwrap_or(current.y);
+                    let from = resolve_point(*from_x, *from_y, &fmt.unit, &current);
+                    current = resolve_point(*to_x, *to_y, &fmt.unit, &from);
                     for p in [&from, &current] {
                         min.x = min.x.min(p.x - radius);
                         min.y = min.y.min(p.y - radius);
@@ -492,6 +487,14 @@ pub enum ExcellonError {
 impl From<ExcellonError> for std::io::Error {
     fn from(e: ExcellonError) -> Self {
         std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+    }
+}
+
+/// A coordinate in mm; an omitted axis keeps its value from `current`.
+pub(crate) fn resolve_point(x: Option<f64>, y: Option<f64>, unit: &Unit, current: &Pos) -> Pos {
+    Pos {
+        x: x.map_or(current.x, |v| v.to_mm(unit)),
+        y: y.map_or(current.y, |v| v.to_mm(unit)),
     }
 }
 

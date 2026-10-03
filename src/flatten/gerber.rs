@@ -14,12 +14,9 @@ use super::geom::{Point, single_quadrant_center};
 use super::layer::{
     Affine2, ApertureImage, DefId, Definition, FlatLayer, FlattenError, FlattenIssue,
     FlattenIssueKind, FlattenOptions, GraphicsObject, Op, Path, Polarity, Segment, Shape,
-    SourceRange, SpecFeature, TransformSet,
+    SourceRange, SpecFeature, TransformSet, push_op, same_point,
 };
 use crate::gerber::GerberLayerData;
-
-/// Two points closer than this (mm) are the same point.
-const SAME_POINT: f64 = 1e-6;
 
 impl GerberLayerData {
     /// Flattens the layer with default [`FlattenOptions`].
@@ -132,33 +129,9 @@ impl<'a> Builder<'a> {
         self.scopes.last_mut().expect("root scope is always open")
     }
 
-    /// Appends an op to the open scope. A stroke continuing the previous
-    /// stroke (same aperture and polarity, starting at its end) extends it.
+    /// Appends an op to the open scope, extending a continued stroke.
     fn push(&mut self, op: Op) {
-        let ops = &mut self.scope().ops;
-        if let Op::Object(GraphicsObject {
-            shape: Shape::Path(next),
-            polarity,
-            source,
-            aperture,
-            ..
-        }) = &op
-            && let Some(Op::Object(GraphicsObject {
-                shape: Shape::Path(prev),
-                polarity: prev_polarity,
-                source: prev_source,
-                aperture: prev_aperture,
-                ..
-            })) = ops.last_mut()
-            && prev_aperture == aperture
-            && prev_polarity == polarity
-            && same_point(prev.end(), next.start)
-        {
-            prev.segments.extend_from_slice(&next.segments);
-            prev_source.end = source.end;
-            return;
-        }
-        ops.push(op);
+        push_op(&mut self.scope().ops, op);
     }
 
     /// An object at the current polarity.
@@ -558,10 +531,6 @@ impl<'a> Builder<'a> {
         self.out.root = self.scopes.pop().expect("root scope").ops;
         Ok(self.out)
     }
-}
-
-fn same_point(a: Point, b: Point) -> bool {
-    (a[0] - b[0]).abs() < SAME_POINT && (a[1] - b[1]).abs() < SAME_POINT
 }
 
 #[cfg(test)]

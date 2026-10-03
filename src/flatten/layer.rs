@@ -257,6 +257,8 @@ pub enum SpecFeature {
     Region,
     CircularArc,
     SingleQuadrantArc,
+    ExcellonRoute,
+    ExcellonSlot,
     ClearPolarity,
     StepAndRepeat,
     ApertureBlock,
@@ -290,6 +292,8 @@ pub enum FlattenIssueKind {
     UnclosedRegion,
     #[error("aperture block (AB) is not closed")]
     UnclosedApertureBlock,
+    #[error("unparsed command: {0}")]
+    Unparsed(String),
     #[error("{0} is not supported yet and was ignored")]
     Unsupported(&'static str),
 }
@@ -392,6 +396,41 @@ pub struct FlatLayer {
     /// uses it).
     pub features: BTreeMap<SpecFeature, usize>,
     pub issues: Vec<FlattenIssue>,
+}
+
+/// Appends `op` to `ops`. A stroke continuing the previous stroke (same
+/// aperture and polarity, starting at its end) extends it instead.
+pub(super) fn push_op(ops: &mut Vec<Op>, op: Op) {
+    if let Op::Object(GraphicsObject {
+        shape: Shape::Path(next),
+        polarity,
+        source,
+        aperture,
+        ..
+    }) = &op
+        && let Some(Op::Object(GraphicsObject {
+            shape: Shape::Path(prev),
+            polarity: prev_polarity,
+            source: prev_source,
+            aperture: prev_aperture,
+            ..
+        })) = ops.last_mut()
+        && prev_aperture == aperture
+        && prev_polarity == polarity
+        && same_point(prev.end(), next.start)
+    {
+        prev.segments.extend_from_slice(&next.segments);
+        prev_source.end = source.end;
+        return;
+    }
+    ops.push(op);
+}
+
+/// Two points closer than this (mm) are the same point.
+const SAME_POINT: f64 = 1e-6;
+
+pub(super) fn same_point(a: Point, b: Point) -> bool {
+    (a[0] - b[0]).abs() < SAME_POINT && (a[1] - b[1]).abs() < SAME_POINT
 }
 
 /// An object of the expanded stream, with its final placement.
