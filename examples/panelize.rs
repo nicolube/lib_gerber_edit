@@ -37,7 +37,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 x: ix as f64 * (size.width + gap),
                 y: iy as f64 * (size.height + gap),
             });
-            panel.merge(&copy);
+            panel.merge(&copy)?;
         }
     }
     panel.write_to_folder(Path::new(output))?;

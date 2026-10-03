@@ -1,4 +1,4 @@
-use crate::error::ParseError;
+use crate::error::{MergeError, MergeSide, ParseError};
 use crate::gerber_types::{CoordinateOffset, InterpolationMode};
 use crate::unit_able::{UnitAble, map_macro_decimal};
 use crate::{
@@ -8,14 +8,14 @@ use crate::{
 use chrono::Utc;
 use gerber_parser::GerberDoc;
 use gerber_parser::gerber_types::{
-    Aperture, ApertureDefinition, ApertureMacro, Command, CommentContent, CoordinateFormat,
-    CoordinateMode, CoordinateNumber, Coordinates, DCode, ExtendedCode, FileAttribute,
-    FunctionCode, GCode, GerberCode, GerberDate, GerberResult, ImageName, MCode, MacroContent,
-    MacroDecimal, Operation, Polarity, QuadrantMode, StandardComment, StepAndRepeat, Unit,
-    ZeroOmission,
+    Aperture, ApertureBlock, ApertureDefinition, ApertureMacro, Command, CommentContent,
+    CoordinateFormat, CoordinateMode, CoordinateNumber, Coordinates, DCode, ExtendedCode,
+    FileAttribute, FunctionCode, GCode, GerberCode, GerberDate, GerberResult, ImageName, MCode,
+    MacroContent, MacroDecimal, Mirroring, Operation, Polarity, QuadrantMode, Rotation, Scaling,
+    StandardComment, StepAndRepeat, Unit, ZeroOmission,
 };
 use log::debug;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufReader, BufWriter, Read, Write};
 
 /// A parsed RS-274X (Extended Gerber) layer, split into its logical components.
@@ -336,58 +336,202 @@ impl LayerScale for GerberLayerData {
 }
 
 impl LayerMerge for GerberLayerData {
-    fn merge(&mut self, other: &Self) {
-        let mut aperture_id = 10;
-        let mut aperture_id_map = HashMap::new();
-
-        let other = other.clone().to_unit(&self.unit);
-
-        for (id, aperture) in &other.apertures {
-            let found_id =
-                self.apertures.iter().find_map(
-                    |(id, current)| {
-                        if current == aperture { Some(id) } else { None }
-                    },
-                );
-            while self.apertures.contains_key(&aperture_id) && found_id.is_none() {
-                aperture_id += 1;
+    /// Appends `other` (converted to this layer's unit).
+    ///
+    /// Macros are merged by body: an identical body is reused, a name clash
+    /// with a different body is renamed to `<name>_<n>`. Apertures (and
+    /// aperture-block codes) are deduplicated or moved to free D-codes. The
+    /// appended part starts from reset graphics state (G01, dark polarity,
+    /// G75 / LM / LR / LS when the receiver changed them). Fails without
+    /// changes when either side ends inside an open region or aperture
+    /// block.
+    fn check_merge(&self, other: &Self) -> Result<(), MergeError> {
+        for (commands, side) in [
+            (&self.commands, MergeSide::Receiver),
+            (&other.commands, MergeSide::Source),
+        ] {
+            let state = EndState::of(commands);
+            if state.open_region {
+                return Err(MergeError::OpenRegion(side));
             }
-
-            let aperture_id = *found_id.unwrap_or(&aperture_id);
-            aperture_id_map.insert(id, aperture_id);
-            self.apertures.insert(aperture_id, aperture.clone());
-        }
-
-        for command in other.commands {
-            if let Command::FunctionCode(FunctionCode::DCode(DCode::SelectAperture(id))) = command {
-                let d_code = aperture_id_map.get(&id).unwrap();
-                self.commands
-                    .push(Command::FunctionCode(FunctionCode::DCode(
-                        DCode::SelectAperture(*d_code),
-                    )));
-            } else if let Command::FunctionCode(FunctionCode::DCode(DCode::Operation(op))) = command
-            {
-                let mut op = op.clone();
-                match &mut op {
-                    Operation::Interpolate(Some(cords), _)
-                    | Operation::Move(Some(cords))
-                    | Operation::Flash(Some(cords)) => {
-                        cords.format = self.coordinate_format;
-                    }
-                    _ => {}
-                };
-                if let Operation::Interpolate(_, Some(cords)) = &mut op {
-                    cords.format = self.coordinate_format
-                }
-                self.commands
-                    .push(Command::FunctionCode(FunctionCode::DCode(
-                        DCode::Operation(op),
-                    )));
-            } else {
-                self.commands.push(command.clone());
+            if state.open_blocks > 0 {
+                return Err(MergeError::OpenBlock(side));
             }
         }
+        Ok(())
     }
+
+    fn merge(&mut self, other: &Self) -> Result<(), MergeError> {
+        self.check_merge(other)?;
+        // Nothing below fails, so `self` is mutated directly.
+        let mine = EndState::of(&self.commands);
+        let other: std::borrow::Cow<Self> = if other.unit == self.unit {
+            std::borrow::Cow::Borrowed(other)
+        } else {
+            std::borrow::Cow::Owned(other.clone().to_unit(&self.unit))
+        };
+        let macros = &mut self.macros;
+
+        // Macros: reuse identical bodies, rename clashing names.
+        let mut macro_names: HashMap<String, String> = HashMap::new();
+        let mut names: Vec<_> = other.macros.keys().collect();
+        names.sort();
+        for name in names {
+            let body = &other.macros[name];
+            let target = match macros.iter().find(|(_, b)| *b == body) {
+                Some((existing, _)) => existing.clone(),
+                None => {
+                    let mut target = name.clone();
+                    let mut n = 0;
+                    while macros.contains_key(&target) {
+                        n += 1;
+                        target = format!("{name}_{n}");
+                    }
+                    macros.insert(target.clone(), body.clone());
+                    target
+                }
+            };
+            macro_names.insert(name.clone(), target);
+        }
+
+        // Apertures and aperture-block codes.
+        let apertures = &mut self.apertures;
+        let mut used: HashSet<i32> = apertures.keys().copied().collect();
+        used.extend(block_codes(&self.commands));
+        let mut next_code = 10;
+        let mut codes: HashMap<i32, i32> = HashMap::new();
+        let mut ids: Vec<_> = other.apertures.keys().copied().collect();
+        ids.sort();
+        for id in ids {
+            let mut aperture = other.apertures[&id].clone();
+            if let Aperture::Macro(name, _) = &mut aperture
+                && let Some(target) = macro_names.get(name)
+            {
+                *name = target.clone();
+            }
+            let code = match apertures.iter().find(|(_, a)| **a == aperture) {
+                Some((code, _)) => *code,
+                None => {
+                    let code = next_free(&mut used, &mut next_code);
+                    apertures.insert(code, aperture);
+                    code
+                }
+            };
+            codes.insert(id, code);
+        }
+        let mut blocks: Vec<_> = block_codes(&other.commands).collect();
+        blocks.sort();
+        for code in blocks {
+            codes.insert(code, next_free(&mut used, &mut next_code));
+        }
+
+        // Seam: the appended commands start from the default graphics state.
+        let mut appended = vec![Command::FunctionCode(FunctionCode::GCode(
+            GCode::InterpolationMode(InterpolationMode::Linear),
+        ))];
+        if mine.clear_polarity {
+            appended.push(ExtendedCode::LoadPolarity(Polarity::Dark).into());
+        }
+        if mine.single_quadrant {
+            appended.push(GCode::QuadrantMode(QuadrantMode::Multi).into());
+        }
+        if mine.load_transform {
+            appended.push(ExtendedCode::LoadMirroring(Mirroring::None).into());
+            appended.push(ExtendedCode::LoadRotation(Rotation { rotation: 0.0 }).into());
+            appended.push(ExtendedCode::LoadScaling(Scaling { scale: 1.0 }).into());
+        }
+        for command in &other.commands {
+            let mut command = command.clone();
+            if let Some(coords) = operation_coords(&mut command) {
+                coords.format = self.coordinate_format;
+            }
+            match &mut command {
+                Command::FunctionCode(FunctionCode::DCode(DCode::SelectAperture(id))) => {
+                    if let Some(code) = codes.get(id) {
+                        *id = *code;
+                    }
+                }
+                Command::ExtendedCode(ExtendedCode::ApertureBlock(ApertureBlock::Open {
+                    code,
+                })) => {
+                    if let Some(new) = codes.get(code) {
+                        *code = *new;
+                    }
+                }
+                Command::FunctionCode(FunctionCode::DCode(DCode::Operation(
+                    Operation::Interpolate(_, Some(offset)),
+                ))) => offset.format = self.coordinate_format,
+                _ => {}
+            }
+            appended.push(command);
+        }
+
+        self.commands.extend(appended);
+        self.parse_errors.extend(other.parse_errors.iter().cloned());
+        Ok(())
+    }
+}
+
+/// The lowest D-code from `next` up that is not in `used`; marks it used.
+fn next_free(used: &mut HashSet<i32>, next: &mut i32) -> i32 {
+    while used.contains(next) {
+        *next += 1;
+    }
+    used.insert(*next);
+    *next
+}
+
+/// Graphics state at the end of a command list that matters for appending.
+#[derive(Default)]
+struct EndState {
+    open_region: bool,
+    open_blocks: usize,
+    clear_polarity: bool,
+    single_quadrant: bool,
+    /// Any LM / LR / LS command was used.
+    load_transform: bool,
+}
+
+impl EndState {
+    fn of(commands: &[Command]) -> Self {
+        let mut state = EndState::default();
+        for command in commands {
+            match command {
+                Command::FunctionCode(FunctionCode::GCode(GCode::RegionMode(open))) => {
+                    state.open_region = *open
+                }
+                Command::FunctionCode(FunctionCode::GCode(GCode::QuadrantMode(q))) => {
+                    state.single_quadrant = *q == QuadrantMode::Single
+                }
+                Command::ExtendedCode(ExtendedCode::LoadPolarity(p)) => {
+                    state.clear_polarity = *p == Polarity::Clear
+                }
+                Command::ExtendedCode(ExtendedCode::ApertureBlock(ApertureBlock::Open {
+                    ..
+                })) => state.open_blocks += 1,
+                Command::ExtendedCode(ExtendedCode::ApertureBlock(ApertureBlock::Close)) => {
+                    state.open_blocks = state.open_blocks.saturating_sub(1)
+                }
+                Command::ExtendedCode(
+                    ExtendedCode::LoadMirroring(_)
+                    | ExtendedCode::LoadRotation(_)
+                    | ExtendedCode::LoadScaling(_),
+                ) => state.load_transform = true,
+                _ => {}
+            }
+        }
+        state
+    }
+}
+
+/// D-codes defined by aperture blocks (`%ABD<n>*%`).
+fn block_codes(commands: &[Command]) -> impl Iterator<Item = i32> + '_ {
+    commands.iter().filter_map(|c| match c {
+        Command::ExtendedCode(ExtendedCode::ApertureBlock(ApertureBlock::Open { code })) => {
+            Some(*code)
+        }
+        _ => None,
+    })
 }
 
 impl LayerStepAndRepeat for GerberLayerData {
@@ -1214,6 +1358,89 @@ M02*
         layer.rebase(0, &Pos { x: 1.0, y: 1.0 });
         assert_points(&resolved_points(&layer), &[(2.0, 3.0), (4.0, 3.0)]);
         Ok(())
+    }
+
+    fn gerber(body: &str) -> GerberLayerData {
+        let gbr = format!("%FSLAX46Y46*%\n%MOMM*%\n{body}M02*\n");
+        GerberLayerData::from_type(LayerType::Top, BufReader::new(gbr.as_bytes())).unwrap()
+    }
+
+    #[test]
+    fn test_merge_macros_by_body() {
+        let mut a = gerber("%AMPAD*\n1,1,1.0,0,0*%\n%ADD10PAD*%\nD10*\nX0Y0D03*\n");
+        // Same name, different body: renamed and the AD follows the rename.
+        let b = gerber("%AMPAD*\n21,1,2.0,1.0,0,0,0*%\n%ADD10PAD*%\nD10*\nX0Y0D03*\n");
+        // Same body under another name: reused.
+        let c = gerber("%AMDOT*\n1,1,1.0,0,0*%\n%ADD11DOT*%\nD11*\nX0Y0D03*\n");
+        a.merge(&b).unwrap();
+        a.merge(&c).unwrap();
+        let mut names: Vec<_> = a.macros.keys().cloned().collect();
+        names.sort();
+        assert_eq!(names, ["PAD", "PAD_1"]);
+        let mut used: Vec<_> = a
+            .apertures
+            .values()
+            .map(|ap| match ap {
+                Aperture::Macro(name, _) => name.clone(),
+                _ => panic!("expected macro apertures"),
+            })
+            .collect();
+        used.sort();
+        assert_eq!(used, ["PAD", "PAD_1"]);
+        let flat = a.flatten().unwrap();
+        assert_eq!(flat.iter_expanded().count(), 3);
+        assert!(flat.issues.is_empty(), "{:?}", flat.issues);
+    }
+
+    #[test]
+    fn test_merge_resets_state_and_remaps_blocks() {
+        let mut a =
+            gerber("%ADD10C,0.5*%\n%ABD11*%\nD10*\nX0Y0D03*\n%AB*%\n%LPC*%\nD11*\nX0Y0D03*\n");
+        let b = gerber("%ADD10C,0.5*%\n%ABD11*%\nD10*\nX0Y0D03*\n%AB*%\nD11*\nX0Y0D03*\n");
+        a.merge(&b).unwrap();
+        let flat = a.flatten().unwrap();
+        let polarities: Vec<_> = flat.iter_expanded().map(|e| e.polarity).collect();
+        use crate::flatten::Polarity as P;
+        // The receiver's block flash is clear; the merged one (moved off the
+        // clashing D11) is dark again despite the receiver's LPC.
+        assert_eq!(polarities, [P::Clear, P::Dark]);
+        assert!(flat.issues.is_empty(), "{:?}", flat.issues);
+    }
+
+    #[test]
+    fn test_merge_open_region_leaves_receiver_unchanged() {
+        let mut a = gerber("%ADD10C,0.5*%\nD10*\nX0Y0D03*\n");
+        let before = a.clone();
+        let open = gerber("G36*\nX0Y0D02*\nX1000000Y0D01*\n");
+        assert_eq!(
+            a.merge(&open),
+            Err(MergeError::OpenRegion(MergeSide::Source))
+        );
+        assert_eq!(a, before);
+    }
+
+    #[test]
+    fn test_board_merge_is_transactional() {
+        use crate::board::Board;
+        use crate::layer::Layer;
+        let layer = |ty: LayerType, data: GerberLayerData| Layer {
+            ty,
+            name: format!("{ty:?}.gbr"),
+            data: data.into(),
+        };
+        let ok = || gerber("%ADD10C,0.5*%\nD10*\nX0Y0D03*\n");
+        let mut board = Board::empty();
+        board.add_layer(layer(LayerType::Top, ok())).unwrap();
+        board.add_layer(layer(LayerType::Bottom, ok())).unwrap();
+        let before = board.clone();
+        let mut other = Board::empty();
+        other.add_layer(layer(LayerType::Top, ok())).unwrap();
+        other
+            .add_layer(layer(LayerType::Bottom, gerber("G36*\nX0Y0D02*\n")))
+            .unwrap();
+        let err = board.merge(&other).unwrap_err();
+        assert!(matches!(err, MergeError::Layer { .. }), "{err}");
+        assert_eq!(board, before, "the Top layer must not be merged either");
     }
 
     #[test]

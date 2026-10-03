@@ -1,4 +1,4 @@
-use crate::error::ParseError;
+use crate::error::{MergeError, ParseError};
 use crate::excellon_format::{ExcellonLayerData, parse_excellon};
 use crate::gerber::GerberLayerData;
 use crate::{LayerCorners, LayerMerge, LayerRotate, LayerStepAndRepeat, LayerTransform, Pos};
@@ -94,6 +94,15 @@ impl LayerData {
         }
     }
 
+    /// Short name of the data kind, for messages.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            LayerData::Gerber(_) => "Gerber",
+            LayerData::Excellon(_) => "Excellon",
+            LayerData::Info(_) => "info",
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         match self {
             LayerData::Gerber(layer) => layer.is_empty(),
@@ -104,15 +113,25 @@ impl LayerData {
 }
 
 impl LayerMerge for LayerData {
-    fn merge(&mut self, other: &Self) {
+    fn check_merge(&self, other: &Self) -> Result<(), MergeError> {
         match (self, other) {
-            (LayerData::Excellon(s), LayerData::Excellon(o)) => {
-                s.merge(o);
-            }
-            (LayerData::Gerber(s), LayerData::Gerber(o)) => {
-                s.merge(o);
-            }
-            _ => panic!("Cannot merge layers of diffrent type"),
+            (LayerData::Excellon(s), LayerData::Excellon(o)) => s.check_merge(o),
+            (LayerData::Gerber(s), LayerData::Gerber(o)) => s.check_merge(o),
+            (target, other) => Err(MergeError::TypeMismatch {
+                target: target.kind(),
+                other: other.kind(),
+            }),
+        }
+    }
+
+    fn merge(&mut self, other: &Self) -> Result<(), MergeError> {
+        match (self, other) {
+            (LayerData::Excellon(s), LayerData::Excellon(o)) => s.merge(o),
+            (LayerData::Gerber(s), LayerData::Gerber(o)) => s.merge(o),
+            (target, other) => Err(MergeError::TypeMismatch {
+                target: target.kind(),
+                other: other.kind(),
+            }),
         }
     }
 }

@@ -27,11 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - `excellon_format::Command` and `ExcellonError` are `#[non_exhaustive]`;
   `Mode` is `Copy`.
+- `LayerMerge::merge`, `merge_from` and `Board::add_layer` return
+  `Result<(), MergeError>`; new `LayerMerge::check_merge`. A failed merge
+  leaves the receiver (and for boards, every layer) unchanged. Merging
+  layers of different kinds is an error instead of a panic.
 
 ### Fixed
 - `get_corners` finds the real centre of single-quadrant (G74) arcs instead
   of adding the unsigned offsets.
 - Excellon arc lines (`G02X..Y..A..`) no longer fail to parse.
+- Gerber merge copies the merged layer's aperture macros (identical bodies
+  reused, clashing names renamed to `<name>_<n>`), remaps aperture-block
+  D-codes instead of panicking, resets polarity / quadrant / LM-LR-LS at
+  the seam, keeps the source's parse errors, and rejects layers ending
+  inside an open region or aperture block.
 - Rotating a Gerber layer rotates macro apertures too (the angle is added
   to each primitive's rotation) instead of leaving them unrotated with a
   warning.

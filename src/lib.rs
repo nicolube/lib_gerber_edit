@@ -116,15 +116,22 @@ pub trait LayerScale {
 pub trait LayerMerge: Sized {
     /// Appends `other` into `self`.
     ///
-    /// Aperture and tool IDs are remapped to avoid collisions.
-    fn merge(&mut self, other: &Self);
+    /// Aperture, macro and tool IDs are remapped to avoid collisions. The
+    /// merge is transactional: on error `self` is left unchanged.
+    fn merge(&mut self, other: &Self) -> std::result::Result<(), error::MergeError>;
+
+    /// Checks whether [`merge`](Self::merge) would succeed, without
+    /// changing anything.
+    fn check_merge(&self, _other: &Self) -> std::result::Result<(), error::MergeError> {
+        Ok(())
+    }
 
     /// Converts `other` into `Self` and merges it.
     ///
     /// Convenience wrapper around [`merge`](Self::merge) that accepts any type
     /// that can be converted into `Self` via [`Into`].
-    fn merge_from(&mut self, other: impl Into<Self>) {
-        self.merge(&other.into());
+    fn merge_from(&mut self, other: impl Into<Self>) -> std::result::Result<(), error::MergeError> {
+        self.merge(&other.into())
     }
 }
 
@@ -197,7 +204,8 @@ macro_rules! load_board_data {
                 ty: $ty,
                 name: $name.to_string(),
                 data: load_layer_data!(concat!($path, $name)).1
-            });
+            })
+            .expect("static layers merge");
          )*
         board
     }};
@@ -213,12 +221,13 @@ mod tests {
     #[test]
     fn it_works() {
         let folders = ["mobo"];
-        if Path::new("output").exists() {
-            fs::remove_dir_all("output").unwrap();
-        }
         for folder in folders {
             let in_path = Path::new("test").join(folder);
+            // Only this test's folder: other tests write into `output/` too.
             let out_path = Path::new("output").join(folder);
+            if out_path.exists() {
+                fs::remove_dir_all(&out_path).unwrap();
+            }
             fs::create_dir_all(&out_path).unwrap();
             println!("Processing folder: {:?}", in_path);
             let result = Board::from_folder(&in_path).unwrap();
@@ -250,7 +259,7 @@ mod tests {
                 y: size.height + 5.0,
                 x: 0.0,
             });
-            board.merge(&copy);
+            board.merge(&copy).unwrap();
 
             board.write_to_folder(&out_path).unwrap();
         }

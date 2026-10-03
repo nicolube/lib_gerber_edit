@@ -45,7 +45,7 @@ let size = board.get_size();
 let mut copy = board.clone();
 copy.transform(&Pos { x: size.width + 2.0, y: 0.0 }); // 2 mm gap
 
-board.merge(&copy);
+board.merge(&copy)?;
 # let out = std::env::temp_dir().join("lib_gerber_edit-readme-panel");
 board.write_to_folder(&out)?;
 # Ok(())
@@ -75,7 +75,7 @@ board.add_layer(Layer {
     ty: LayerType::SilkScreenTop,
     name: "board.gto".to_string(),
     data: rev_layer.into(),
-});
+})?;
 # let out = std::env::temp_dir().join("lib_gerber_edit-readme-text");
 board.write_to_folder(&out)?;
 # Ok(())
@@ -94,7 +94,7 @@ board.write_to_folder(&out)?;
 | `LayerCorners` | `get_size() -> Size` | Width/height derived from `get_corners` |
 | `LayerTransform` | `transform(&Pos)` | Translate all coordinates |
 | `LayerScale` | `scale(x, y)` | Multiply X and Y coordinates independently |
-| `LayerMerge` | `merge(&Self)` | Append another layer/board; aperture IDs are remapped |
+| `LayerMerge` | `merge(&Self) -> Result<(), MergeError>` | Append another layer/board; apertures, macros and tools are remapped; on error nothing changes |
 | `LayerStepAndRepeat` | `step_and_repeat(nx, ny, offset)` | Grid replication |
 
 All traits are implemented for `Board`, `GerberLayerData`, `ExcellonLayerData`, and `LayerData`.
@@ -104,7 +104,7 @@ All traits are implemented for `Board`, `GerberLayerData`, `ExcellonLayerData`, 
 ```text
 Board::from_folder(path)          // load all recognised layers from a directory
 Board::load(vec![("name.gbr", reader), ...]) // load from in-memory readers
-board.add_layer(layer)            // merge if type exists, insert otherwise
+board.add_layer(layer)?           // merge if type exists, insert otherwise
 board.get_layer(&LayerType::Top)  // look up a layer by type
 board.write_to_folder(path)       // write all layers back to disk
 ```

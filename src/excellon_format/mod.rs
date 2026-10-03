@@ -1,3 +1,4 @@
+use crate::error::MergeError;
 use crate::unit_able::UnitAble;
 use crate::{
     LayerCorners, LayerData, LayerMerge, LayerRotate, LayerScale, LayerStepAndRepeat,
@@ -250,7 +251,16 @@ impl LayerRotate for ExcellonLayerData {
 }
 
 impl LayerMerge for ExcellonLayerData {
-    fn merge(&mut self, other: &Self) {
+    /// Excellon programs carry no state that can make a merge fail.
+    fn merge(&mut self, other: &Self) -> Result<(), MergeError> {
+        self.append(other);
+        Ok(())
+    }
+}
+
+impl ExcellonLayerData {
+    /// Appends `other`, remapping tool numbers.
+    fn append(&mut self, other: &Self) {
         let mut next_free = 1;
         let mut tool_map = HashMap::new();
         for tool in &other.tools {
@@ -368,7 +378,7 @@ impl LayerStepAndRepeat for ExcellonLayerData {
                 };
                 let mut copy = copy.clone();
                 copy.transform(&pos);
-                self.merge(&copy);
+                self.append(&copy);
             }
         }
     }
@@ -1327,7 +1337,7 @@ mod tests {
         let mut data = parse_excellon(reader)?;
         let mut clone = data.clone();
         clone.transform(&Pos { x: 10.0, y: 15.0 });
-        data.merge(&clone);
+        data.merge(&clone).unwrap();
         for cmd in data.header {
             cmd?;
         }

@@ -1,3 +1,4 @@
+use crate::error::MergeError;
 use crate::excellon_format::ExcellonLayerData;
 use crate::gerber::GerberLayerData;
 use crate::layer::{Layer, LayerData, LayerType};
@@ -189,7 +190,9 @@ impl Board {
     ///
     /// Accepts anything that converts into a [`Layer`] (e.g. [`GerberLayerData`],
     /// [`ExcellonLayerData`](crate::excellon_format::ExcellonLayerData)).
-    pub fn add_layer(&mut self, layer: impl Into<Layer>) {
+    ///
+    /// A failed merge leaves the board unchanged.
+    pub fn add_layer(&mut self, layer: impl Into<Layer>) -> Result<(), MergeError> {
         let layer = layer.into();
         let existing = self.0.iter_mut().find(|e| e.ty == layer.ty);
         if let Some(existing) = existing {
@@ -201,6 +204,7 @@ impl Board {
         } else {
             debug!("Adding new layer '{}' ({:?})", layer.name, layer.ty);
             self.0.push(layer);
+            Ok(())
         }
     }
 
@@ -433,12 +437,28 @@ impl LayerMerge for Board {
     /// Only layers whose [`LayerType`] already exists in `self` are updated.
     /// Layer types present in `other` but not in `self` are ignored — use
     /// [`add_layer`](Board::add_layer) to insert a new layer instead.
-    fn merge(&mut self, other: &Self) {
-        for layer in &mut self.0 {
+    ///
+    /// Every layer pair is checked first, so a failure on any layer leaves
+    /// the whole board unchanged.
+    fn merge(&mut self, other: &Self) -> Result<(), MergeError> {
+        let wrap = |layer: &Layer, e| MergeError::Layer {
+            layer: layer.name.clone(),
+            source: Box::new(e),
+        };
+        for layer in &self.0 {
             if let Some(other) = other.get_layer(&layer.ty) {
-                layer.data.merge(&other.data)
+                layer
+                    .data
+                    .check_merge(&other.data)
+                    .map_err(|e| wrap(layer, e))?;
             }
         }
+        for layer in &mut self.0 {
+            if let Some(other) = other.get_layer(&layer.ty) {
+                layer.data.merge(&other.data).map_err(|e| wrap(layer, e))?;
+            }
+        }
+        Ok(())
     }
 }
 
