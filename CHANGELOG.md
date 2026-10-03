@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fails with `WriteError::Incomplete` unless `WriteOptions::allow_incomplete`
   is set; all checks run before any file is opened (`Board::check_write`).
 - `LayerDiagnostics`, `Layer::diagnostics`, `Board::diagnostics`.
+- MIGRATING.md (0.6 → 0.7) and a "Supported spec features" table and
+  flattening example in the README.
 - `flatten` module: `aperture_shapes` turns any aperture into polygons in mm,
   including holes and aperture macros (expressions, variables, all
   primitives, exposure off, rotation). Errors come back as `MacroError`.

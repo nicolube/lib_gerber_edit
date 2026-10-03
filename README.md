@@ -20,6 +20,11 @@ lib_gerber_edit = "0.6"
 - **Merge** two boards or layers of the same type
 - **Step-and-repeat** — tile a pattern across a grid
 - **Bounding-box queries** — with correct tool-width and arc accounting
+- **Flatten** a layer into plain geometry (strokes, flashes, regions, exact
+  arcs, aperture macros as polygons, step-and-repeat / aperture blocks as
+  instances) for rendering or hit-testing
+- **Safe saving** — unedited layers are written byte-for-byte; edited layers
+  with content the library did not understand are refused unless allowed
 - **Vector text** — render ASCII strings into a Gerber silkscreen layer with configurable size, line thickness, and horizontal/vertical alignment
 - **Error messages** include the file name and line number of the failing layer
 
@@ -128,6 +133,61 @@ AsciiText::new(size_mm)           // character height in mm
 
 The origin `(0, 0)` of the returned layer corresponds to the chosen alignment anchor.
 
+### Flattening
+
+```rust
+use lib_gerber_edit::board::Board;
+use lib_gerber_edit::flatten::Shape;
+use lib_gerber_edit::layer::LayerData;
+use std::path::Path;
+
+# fn main() -> Result<(), Box<dyn std::error::Error>> {
+let board = Board::from_folder(Path::new("test/mobo"))?.board;
+for layer in board.layers() {
+    let LayerData::Gerber(gerber) = &layer.data else { continue };
+    let flat = gerber.flatten()?;
+    let flashes = flat
+        .iter_expanded()
+        .filter(|o| o.object.shape == Shape::Flash)
+        .count();
+    println!("{}: {flashes} flashes, {} issues", layer.name, flat.issues.len());
+}
+# Ok(())
+# }
+```
+
+`FlatLayer::iter_expanded` yields every object in drawing order with its
+final transform and polarity; `FlatLayer::root` / `definitions` keep
+step-and-repeat and aperture blocks instanced for renderers that reuse
+meshes. All coordinates are mm; aperture images (`FlatLayer::apertures`)
+are polygons with outer contours counter-clockwise and holes clockwise
+(NonZero fill). Only these aperture images are approximated (chord
+tolerance `FlattenOptions::tolerance_mm`, default 0.002 mm); paths and
+regions keep exact arcs.
+
+---
+
+## Supported spec features
+
+| Feature | Parse | Edit / write | Flatten |
+|---------|-------|--------------|---------|
+| Standard apertures (C, R, O, P) incl. holes | ✓ | ✓ | ✓ |
+| Aperture macros (primitives 1, 4, 5, 7, 20, 21, variables, expressions) | ✓ | ✓ (rotate, unit conversion) | ✓ |
+| Macro primitives 2, 6 (moiré), 22 | needs a gerber_parser release | – | 6 ready |
+| Arcs G02/G03, G74 / G75 | ✓ | ✓ | ✓ exact |
+| Regions G36/G37 | ✓ | ✓ | ✓ |
+| Polarity LPD / LPC | ✓ | ✓ | ✓ |
+| Step and repeat (SR) | ✓ | ✓ | ✓ instanced |
+| Aperture blocks (AB) | ✓ | ✓ (merge remaps) | ✓ instanced |
+| IPNEG | ✓ | ✓ | ✓ flag |
+| LM / LR / LS | ✓ | kept | reported as unsupported |
+| Deprecated image transforms (MI, OF, SF, IR, AS) | ✓ | kept | reported as unsupported |
+| Excellon hits, tools, slots (G85), repeat codes, M15/M16/M17 | ✓ | ✓ | ✓ |
+| Excellon circular routes (`A`, `I`/`J`) | ✓ | ✓ | ✓ exact |
+
+Unsupported content shows up in `Layer::diagnostics()`; it is preserved when
+the layer is saved unedited.
+
 ---
 
 ## Supported layer types
@@ -153,7 +213,7 @@ The origin `(0, 0)` of the returned layer corresponds to the chosen alignment an
 - Tested primarily with output from **KiCad** and **Autodesk Eagle**.
 - Depend on `lib_gerber_edit::gerber_types` (re-exported) rather than on
   `gerber-types` directly, so your types always match the ones this crate uses.
-- Arc bounding boxes follow RS-274X §5.3 (multi-quadrant G75). Single-quadrant G74 arcs may have imprecise bounding boxes.
+- Upgrading from 0.6? See [MIGRATING.md](MIGRATING.md).
 - The library is functional but still evolving — contributions welcome.
 
 ---
