@@ -1,3 +1,4 @@
+use gerber_parser::gerber_types::{FileFunction, GenerationSoftware};
 use std::io;
 
 #[derive(thiserror::Error, Debug)]
@@ -78,16 +79,55 @@ pub enum WriteError {
 }
 
 /// Options for writing layers and boards.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct WriteOptions {
     /// Write edited layers even when their diagnostics are not complete.
     pub allow_incomplete: bool,
+    /// `TF.CreationDate` of rewritten Gerber files; `None` writes the
+    /// current time.
+    pub creation_date: Option<chrono::DateTime<chrono::Utc>>,
+    /// `TF.GenerationSoftware` of rewritten Gerber files; defaults to this
+    /// library and its version, `None` writes none.
+    pub generation_software: Option<GenerationSoftware>,
+    /// `TF.FileFunction` override for rewritten Gerber files. By default the
+    /// source's file function is kept unless the layer type was changed.
+    pub file_function: Option<FileFunction>,
+}
+
+impl Default for WriteOptions {
+    fn default() -> Self {
+        WriteOptions {
+            allow_incomplete: false,
+            creation_date: None,
+            generation_software: Some(GenerationSoftware::new(
+                "lib_gerber_edit",
+                "lib_gerber_edit",
+                Some(env!("CARGO_PKG_VERSION")),
+            )),
+            file_function: None,
+        }
+    }
 }
 
 impl WriteOptions {
     pub fn allow_incomplete(mut self, allow: bool) -> Self {
         self.allow_incomplete = allow;
+        self
+    }
+
+    pub fn creation_date(mut self, date: Option<chrono::DateTime<chrono::Utc>>) -> Self {
+        self.creation_date = date;
+        self
+    }
+
+    pub fn generation_software(mut self, software: Option<GenerationSoftware>) -> Self {
+        self.generation_software = software;
+        self
+    }
+
+    pub fn file_function(mut self, file_function: Option<FileFunction>) -> Self {
+        self.file_function = file_function;
         self
     }
 }

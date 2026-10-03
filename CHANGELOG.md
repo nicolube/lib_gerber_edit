@@ -36,6 +36,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arc.
 
 ### Changed
+- Rewritten Gerber files carry exactly one `%TF.FileFunction` (the source's,
+  unless the layer type changed or `WriteOptions::file_function` overrides
+  it), the lib as `TF.GenerationSoftware` and a fresh `TF.CreationDate`
+  (both configurable in `WriteOptions`); the source's MD5, date and
+  software attributes and the deprecated `%IN` are no longer written.
+  Aperture definitions are written in D-code order.
 - `Board::write_to` and `write_to_folder` take `&WriteOptions` and return
   `WriteError` (name problems are `InvalidName` / `DuplicateName`).
 - `Layer` has a private field; build layers with `Layer::new` or
@@ -48,6 +54,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   layers of different kinds is an error instead of a panic.
 
 ### Fixed
+- Aperture attributes (`%TA`, e.g. `.AperFunction,SMDPad`) were separated
+  from their `%AD` on rewrite; they are now kept per D-code
+  (`GerberLayerData::aperture_attributes`), written in front of their
+  aperture, and respected by merge deduplication.
 - `get_corners` finds the real centre of single-quadrant (G74) arcs instead
   of adding the unsigned offsets.
 - Excellon arc lines (`G02X..Y..A..`) no longer fail to parse.

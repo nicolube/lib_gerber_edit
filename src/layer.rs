@@ -110,7 +110,7 @@ impl Layer {
         options: &WriteOptions,
     ) -> Result<(), WriteError> {
         let plan = self.plan_write(options)?;
-        self.write_planned(writer, plan)
+        self.write_planned(writer, plan, options)
     }
 
     /// Decides how [`write_to`](Self::write_to) writes this layer, or why
@@ -150,13 +150,14 @@ impl Layer {
         &self,
         writer: &mut BufWriter<T>,
         plan: WritePlan,
+        options: &WriteOptions,
     ) -> Result<(), WriteError> {
         match (plan, self.source_bytes()) {
             (WritePlan::Verbatim, Some(bytes)) => {
                 writer.write_all(bytes)?;
                 writer.flush()?;
             }
-            _ => self.data.write_to(writer)?,
+            _ => self.data.write_to_with(writer, options)?,
         }
         Ok(())
     }
@@ -225,12 +226,25 @@ impl LayerData {
         Ok((gerber.layer_type, LayerData::Gerber(gerber)))
     }
 
+    /// Writes the layer with default [`WriteOptions`].
     pub fn write_to<T>(&self, writer: &mut BufWriter<T>) -> GerberResult<()>
     where
         T: Write,
     {
+        self.write_to_with(writer, &WriteOptions::default())
+    }
+
+    /// Writes the layer; `options` set the Gerber file attributes.
+    pub fn write_to_with<T>(
+        &self,
+        writer: &mut BufWriter<T>,
+        options: &WriteOptions,
+    ) -> GerberResult<()>
+    where
+        T: Write,
+    {
         match self {
-            LayerData::Gerber(g) => g.write_to(writer)?,
+            LayerData::Gerber(g) => g.write_to_with(writer, options)?,
             LayerData::Excellon(e) => e.write_to(writer)?,
             LayerData::Info(s) => writer.write_all(s.to_string().as_bytes())?,
         }

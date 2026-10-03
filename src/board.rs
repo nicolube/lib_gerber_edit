@@ -252,7 +252,7 @@ impl Board {
         let plans = self.plan_write(options)?;
         for (layer, plan) in self.0.iter().zip(plans) {
             let mut writer = f(layer)?;
-            layer.write_planned(&mut writer, plan)?;
+            layer.write_planned(&mut writer, plan, options)?;
         }
         Ok(())
     }
@@ -313,7 +313,7 @@ impl Board {
             .zip(&paths)
             .try_for_each(|((layer, plan), (tmp, _))| {
                 let mut writer = BufWriter::new(File::create(tmp)?);
-                layer.write_planned(&mut writer, plan)
+                layer.write_planned(&mut writer, plan, options)
             })
             .and_then(|()| {
                 for (tmp, target) in &paths {
