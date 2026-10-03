@@ -29,6 +29,7 @@
 //!
 //! ```no_run
 //! use lib_gerber_edit::board::Board;
+//! use lib_gerber_edit::error::WriteOptions;
 //! use lib_gerber_edit::{LayerTransform, Pos};
 //! use std::path::Path;
 //!
@@ -43,7 +44,7 @@
 //! board.transform(&Pos { x: 10.0, y: 5.0 });
 //!
 //! // Write back to a different directory.
-//! board.write_to_folder(Path::new("output/")).unwrap();
+//! board.write_to_folder(Path::new("output/"), &WriteOptions::default()).unwrap();
 //! ```
 //!
 //! ### Rendering text
@@ -62,6 +63,7 @@
 //! ```
 
 pub mod board;
+pub mod diagnostics;
 pub mod error;
 pub mod excellon_format;
 pub mod flatten;
@@ -200,11 +202,11 @@ macro_rules! load_board_data {
     ($path:expr, $(($name:literal, $ty:expr)),* $(,)?) => {{
         let mut board = Board::empty();
          $(
-            board.add_layer(Layer {
-                ty: $ty,
-                name: $name.to_string(),
-                data: load_layer_data!(concat!($path, $name)).1
-            })
+            board.add_layer(Layer::new(
+                $ty,
+                $name,
+                load_layer_data!(concat!($path, $name)).1,
+            ))
             .expect("static layers merge");
          )*
         board
@@ -215,6 +217,7 @@ macro_rules! load_board_data {
 mod tests {
     use super::*;
     use crate::board::Board;
+    use crate::error::WriteOptions;
     use std::fs;
     use std::path::Path;
 
@@ -261,7 +264,9 @@ mod tests {
             });
             board.merge(&copy).unwrap();
 
-            board.write_to_folder(&out_path).unwrap();
+            board
+                .write_to_folder(&out_path, &WriteOptions::default())
+                .unwrap();
         }
     }
 }

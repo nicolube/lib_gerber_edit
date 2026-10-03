@@ -6,6 +6,7 @@
 //! ```
 
 use lib_gerber_edit::board::Board;
+use lib_gerber_edit::error::WriteOptions;
 use lib_gerber_edit::{LayerCorners, LayerMerge, LayerTransform, Pos};
 use std::path::Path;
 
@@ -40,7 +41,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             panel.merge(&copy)?;
         }
     }
-    panel.write_to_folder(Path::new(output))?;
+    panel.write_to_folder(Path::new(output), &WriteOptions::default())?;
     let panel_size = panel.get_size();
     println!(
         "wrote {nx}x{ny} panel ({:.2} x {:.2} mm) to {output}",

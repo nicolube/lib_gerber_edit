@@ -31,6 +31,7 @@ lib_gerber_edit = "0.6"
 
 ```rust
 use lib_gerber_edit::board::Board;
+use lib_gerber_edit::error::WriteOptions;
 use lib_gerber_edit::{LayerCorners, LayerMerge, LayerTransform, Pos};
 use std::path::Path;
 
@@ -47,7 +48,7 @@ copy.transform(&Pos { x: size.width + 2.0, y: 0.0 }); // 2 mm gap
 
 board.merge(&copy)?;
 # let out = std::env::temp_dir().join("lib_gerber_edit-readme-panel");
-board.write_to_folder(&out)?;
+board.write_to_folder(&out, &WriteOptions::default())?;
 # Ok(())
 # }
 ```
@@ -56,6 +57,7 @@ board.write_to_folder(&out)?;
 
 ```rust
 use lib_gerber_edit::board::Board;
+use lib_gerber_edit::error::WriteOptions;
 use lib_gerber_edit::gerber_ascii::{AsciiText, HAlign, VAlign};
 use lib_gerber_edit::layer::{Layer, LayerType};
 use lib_gerber_edit::{LayerTransform, Pos};
@@ -71,13 +73,9 @@ let fmt = AsciiText::new(3.0)
 let rev_layer = fmt.build("Rev 1.0", LayerType::SilkScreenTop);
 
 let mut board = Board::from_folder(Path::new("test/mobo"))?.board;
-board.add_layer(Layer {
-    ty: LayerType::SilkScreenTop,
-    name: "board.gto".to_string(),
-    data: rev_layer.into(),
-})?;
+board.add_layer(Layer::new(LayerType::SilkScreenTop, "board.gto", rev_layer))?;
 # let out = std::env::temp_dir().join("lib_gerber_edit-readme-text");
-board.write_to_folder(&out)?;
+board.write_to_folder(&out, &WriteOptions::default())?;
 # Ok(())
 # }
 ```
@@ -106,7 +104,7 @@ Board::from_folder(path)          // load all recognised layers from a directory
 Board::load(vec![("name.gbr", reader), ...]) // load from in-memory readers
 board.add_layer(layer)?           // merge if type exists, insert otherwise
 board.get_layer(&LayerType::Top)  // look up a layer by type
-board.write_to_folder(path)       // write all layers back to disk
+board.write_to_folder(path, &opts)  // write all layers; unedited ones verbatim
 ```
 
 ### `GerberLayerData`

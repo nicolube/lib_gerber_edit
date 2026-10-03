@@ -1447,11 +1447,8 @@ M02*
     fn test_board_merge_is_transactional() {
         use crate::board::Board;
         use crate::layer::Layer;
-        let layer = |ty: LayerType, data: GerberLayerData| Layer {
-            ty,
-            name: format!("{ty:?}.gbr"),
-            data: data.into(),
-        };
+        let layer =
+            |ty: LayerType, data: GerberLayerData| Layer::new(ty, format!("{ty:?}.gbr"), data);
         let ok = || gerber("%ADD10C,0.5*%\nD10*\nX0Y0D03*\n");
         let mut board = Board::empty();
         board.add_layer(layer(LayerType::Top, ok())).unwrap();

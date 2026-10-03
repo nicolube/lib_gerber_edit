@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Export safety: layers loaded through `Board::load` / `from_folder` /
+  `Layer::parse` keep their original bytes. `Layer::is_modified` reports
+  edits; unmodified layers are written byte-for-byte. Saving an edited layer
+  whose `LayerDiagnostics` (parse errors, flatten issues) are not complete
+  fails with `WriteError::Incomplete` unless `WriteOptions::allow_incomplete`
+  is set; all checks run before any file is opened (`Board::check_write`).
+- `LayerDiagnostics`, `Layer::diagnostics`, `Board::diagnostics`.
 - `flatten` module: `aperture_shapes` turns any aperture into polygons in mm,
   including holes and aperture macros (expressions, variables, all
   primitives, exposure off, rotation). Errors come back as `MacroError`.
@@ -25,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arc.
 
 ### Changed
+- `Board::write_to` and `write_to_folder` take `&WriteOptions` and return
+  `WriteError` (name problems are `InvalidName` / `DuplicateName`).
+- `Layer` has a private field; build layers with `Layer::new` or
+  `Layer::parse`. New `LayerData::parse_bytes`.
 - `excellon_format::Command` and `ExcellonError` are `#[non_exhaustive]`;
   `Mode` is `Copy`.
 - `LayerMerge::merge`, `merge_from` and `Board::add_layer` return

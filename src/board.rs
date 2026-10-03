@@ -1,9 +1,10 @@
-use crate::error::MergeError;
+use crate::diagnostics::LayerDiagnostics;
+use crate::error::{MergeError, WriteError, WriteOptions};
 use crate::excellon_format::ExcellonLayerData;
 use crate::gerber::GerberLayerData;
-use crate::layer::{Layer, LayerData, LayerType};
+use crate::layer::{Layer, LayerData, LayerType, WritePlan};
 use crate::{LayerCorners, LayerMerge, LayerRotate, LayerTransform, Pos, error, excellon_format};
-use gerber_parser::gerber_types::{Command, CommentContent, FunctionCode, GCode, GerberResult};
+use gerber_parser::gerber_types::{Command, CommentContent, FunctionCode, GCode};
 use log::{debug, warn};
 use std::collections::HashSet;
 use std::fs;
@@ -57,12 +58,8 @@ impl Board {
             match ty {
                 Ok(ty) => {
                     debug!("Parsing layer '{}' as {:?}", name, ty);
-                    match LayerData::parse(ty, reader) {
-                        Ok((ty, data)) => board.0.push(Layer {
-                            ty,
-                            name: name.to_string(),
-                            data,
-                        }),
+                    match Layer::parse(name, ty, reader) {
+                        Ok(layer) => board.0.push(layer),
                         Err(e) => {
                             warn!("Failed to parse '{}': {}", name, e);
                             errors.push((
@@ -166,8 +163,8 @@ impl Board {
             }
         };
         debug!("Parsing layer '{}' as {:?}", name, ty);
-        match LayerData::parse(ty, BufReader::new(file)) {
-            Ok((ty, data)) => Ok(Layer { ty, name, data }),
+        match Layer::parse(name.clone(), ty, BufReader::new(file)) {
+            Ok(layer) => Ok(layer),
             Err(e) => {
                 warn!("Failed to parse '{}': {}", name, e);
                 Err((name.clone(), error::Error::ParseError(e, name)))
@@ -239,25 +236,47 @@ impl Board {
         self.0.iter_mut().find(|layer| &layer.ty == ty)
     }
 
-    /// Writes all layers using a caller-supplied writer factory.
+    /// Writes every layer through a writer obtained from `f`.
     ///
-    /// `f` is called once per layer and must return an open `BufWriter`.
-    /// Use [`write_to_folder`](Self::write_to_folder) for the common case of
-    /// writing files to a directory. Fails before calling `f` at all if two
-    /// layers share a name or a name is not a plain file name.
+    /// Unmodified layers are written as their original bytes. Everything is
+    /// checked (names, and completeness of edited layers) before `f` is
+    /// called for the first time, so a rejected export opens no writer.
     pub fn write_to<T>(
         &self,
+        options: &WriteOptions,
         f: &mut impl FnMut(&Layer) -> std::io::Result<BufWriter<T>>,
-    ) -> GerberResult<()>
+    ) -> Result<(), WriteError>
     where
         T: Write,
     {
-        self.check_names()?;
-        for layer in &self.0 {
+        let plans = self.plan_write(options)?;
+        for (layer, plan) in self.0.iter().zip(plans) {
             let mut writer = f(layer)?;
-            layer.data.write_to(&mut writer)?;
+            layer.write_planned(&mut writer, plan)?;
         }
         Ok(())
+    }
+
+    /// Runs every check [`write_to`](Self::write_to) performs before
+    /// writing, without writing anything.
+    pub fn check_write(&self, options: &WriteOptions) -> Result<(), WriteError> {
+        self.plan_write(options).map(drop)
+    }
+
+    fn plan_write(&self, options: &WriteOptions) -> Result<Vec<WritePlan>, WriteError> {
+        self.check_names()?;
+        self.0
+            .iter()
+            .map(|layer| layer.plan_write(options))
+            .collect()
+    }
+
+    /// Interpretation diagnostics of every layer, by layer name.
+    pub fn diagnostics(&self) -> Vec<(String, LayerDiagnostics)> {
+        self.0
+            .iter()
+            .map(|layer| (layer.name.clone(), layer.diagnostics()))
+            .collect()
     }
 
     /// Writes all layers to `path`, creating the directory if necessary.
@@ -267,7 +286,8 @@ impl Board {
     /// every layer was written successfully, so a write failure leaves
     /// existing files untouched (the renames themselves are not atomic as a
     /// group).
-    pub fn write_to_folder(&self, path: &Path) -> GerberResult<()> {
+    pub fn write_to_folder(&self, path: &Path, options: &WriteOptions) -> Result<(), WriteError> {
+        let plans = self.plan_write(options)?;
         fs::create_dir_all(path)?;
         let paths: Vec<(PathBuf, PathBuf)> = self
             .0
@@ -277,12 +297,14 @@ impl Board {
                 (path.join(tmp), path.join(&layer.name))
             })
             .collect();
-        let mut index = 0;
         let result = self
-            .write_to(&mut |_: &Layer| {
-                let file = File::create(&paths[index].0);
-                index += 1;
-                Ok(BufWriter::new(file?))
+            .0
+            .iter()
+            .zip(plans)
+            .zip(&paths)
+            .try_for_each(|((layer, plan), (tmp, _))| {
+                let mut writer = BufWriter::new(File::create(tmp)?);
+                layer.write_planned(&mut writer, plan)
             })
             .and_then(|()| {
                 for (tmp, target) in &paths {
@@ -300,23 +322,15 @@ impl Board {
 
     /// Layer names become file names: they must be unique and must not
     /// contain path separators.
-    fn check_names(&self) -> io::Result<()> {
+    fn check_names(&self) -> Result<(), WriteError> {
         let mut seen = HashSet::new();
         for layer in &self.0 {
             let name = layer.name.as_str();
             if name.is_empty() || name.contains(['/', '\\']) || name == ".." {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("layer name '{name}' is not a plain file name; rename the layer"),
-                ));
+                return Err(WriteError::InvalidName(name.to_string()));
             }
             if !seen.insert(name) {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!(
-                        "two layers are named '{name}'; writing both would overwrite one; rename one of them"
-                    ),
-                ));
+                return Err(WriteError::DuplicateName(name.to_string()));
             }
         }
         Ok(())
@@ -479,7 +493,7 @@ mod tests {
     fn test_write_rejects_duplicate_names() {
         let board = Board(vec![layer("a.gbr"), layer("a.gbr")]);
         let mut opened = 0;
-        let result = board.write_to(&mut |_| {
+        let result = board.write_to(&WriteOptions::default(), &mut |_| {
             opened += 1;
             Ok(BufWriter::new(Vec::new()))
         });
@@ -504,7 +518,9 @@ mod tests {
         let board = Board(vec![layer("../evil.gbr")]);
         assert!(
             board
-                .write_to(&mut |_| Ok(BufWriter::new(Vec::new())))
+                .write_to(&WriteOptions::default(), &mut |_| Ok(BufWriter::new(
+                    Vec::new()
+                )))
                 .is_err()
         );
     }
@@ -513,7 +529,9 @@ mod tests {
     #[test]
     fn test_write_propagates_flush_error() {
         let board = Board(vec![layer("a.gbr")]);
-        let result = board.write_to(&mut |_| Ok(BufWriter::new(FailingWriter)));
+        let result = board.write_to(&WriteOptions::default(), &mut |_| {
+            Ok(BufWriter::new(FailingWriter))
+        });
         assert!(result.is_err());
     }
 
@@ -522,7 +540,7 @@ mod tests {
     fn test_write_to_folder_renames_temp_files() -> Result<(), Box<dyn std::error::Error>> {
         let dir = std::env::temp_dir().join(format!("lge-write-{}", std::process::id()));
         let board = Board(vec![layer("a.gbr"), layer("b.gbr")]);
-        board.write_to_folder(&dir)?;
+        board.write_to_folder(&dir, &WriteOptions::default())?;
         let mut names: Vec<_> = fs::read_dir(&dir)?
             .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
             .collect::<Result<_, _>>()?;
@@ -530,5 +548,82 @@ mod tests {
         fs::remove_dir_all(&dir)?;
         assert_eq!(names, vec!["a.gbr", "b.gbr"]);
         Ok(())
+    }
+
+    const UNPARSEABLE: &str = "%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.5*%\nG99*\nD10*\nX0Y0D03*\nM02*\n";
+
+    fn load_one(text: &str) -> Board {
+        let mut bytes = text.as_bytes();
+        let reader: &mut dyn Read = &mut bytes;
+        let result = Board::load(vec![("a.gtl", BufReader::new(reader))]);
+        assert!(result.is_ok(), "{:?}", result.errors);
+        result.board
+    }
+
+    /// Writes every layer into its own buffer after the board-level checks.
+    fn write_all(board: &Board, options: &WriteOptions) -> Result<Vec<Vec<u8>>, WriteError> {
+        board.check_write(options)?;
+        board
+            .layers()
+            .iter()
+            .map(|layer| {
+                let mut w = BufWriter::new(Vec::new());
+                layer.write_to(&mut w, options)?;
+                Ok(w.into_inner().map_err(|e| e.into_error())?)
+            })
+            .collect()
+    }
+
+    /// An unedited layer with content the parser rejected is saved
+    /// byte-for-byte.
+    #[test]
+    fn test_unmodified_layer_written_verbatim() {
+        let board = load_one(UNPARSEABLE);
+        let layer = &board.layers()[0];
+        assert!(!layer.is_modified());
+        assert!(!layer.diagnostics().is_complete());
+        let out = write_all(&board, &WriteOptions::default()).unwrap();
+        assert_eq!(out[0], UNPARSEABLE.as_bytes());
+    }
+
+    /// Editing such a layer makes saving fail before any writer is opened,
+    /// unless incomplete layers are allowed.
+    #[test]
+    fn test_edited_incomplete_layer_needs_permission() {
+        let mut board = load_one(UNPARSEABLE);
+        board.transform(&Pos { x: 1.0, y: 0.0 });
+        assert!(board.layers()[0].is_modified());
+        let mut opened = 0;
+        let err = board
+            .write_to(&WriteOptions::default(), &mut |_| {
+                opened += 1;
+                Ok(BufWriter::new(Vec::new()))
+            })
+            .unwrap_err();
+        assert!(matches!(err, WriteError::Incomplete { .. }), "{err}");
+        assert_eq!(opened, 0);
+        let out = write_all(&board, &WriteOptions::default().allow_incomplete(true)).unwrap();
+        assert!(!out[0].is_empty());
+    }
+
+    /// Any data change counts as a modification; restoring the loaded
+    /// state makes the layer unmodified again.
+    #[test]
+    fn test_is_modified_tracks_state() {
+        let mut board = load_one(UNPARSEABLE);
+        let layer = &mut board.layers_mut()[0];
+        let LayerData::Gerber(g) = &mut layer.data else {
+            panic!("expected Gerber");
+        };
+        let original = g.apertures.clone();
+        g.apertures.insert(11, g.apertures[&10].clone());
+        assert!(layer.is_modified());
+        let LayerData::Gerber(g) = &mut layer.data else {
+            unreachable!()
+        };
+        g.apertures = original;
+        assert!(!layer.is_modified());
+        layer.ty = LayerType::Bottom;
+        assert!(layer.is_modified());
     }
 }

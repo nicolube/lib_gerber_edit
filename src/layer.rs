@@ -1,4 +1,5 @@
-use crate::error::{MergeError, ParseError};
+use crate::diagnostics::LayerDiagnostics;
+use crate::error::{MergeError, ParseError, WriteError, WriteOptions};
 use crate::excellon_format::{ExcellonLayerData, parse_excellon};
 use crate::gerber::GerberLayerData;
 use crate::{LayerCorners, LayerMerge, LayerRotate, LayerStepAndRepeat, LayerTransform, Pos};
@@ -8,7 +9,8 @@ use gerber_parser::gerber_types::{
 };
 use log::debug;
 use std::fmt::{Display, Formatter};
-use std::io::{BufReader, BufWriter, Cursor, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
+use std::sync::Arc;
 
 #[cfg(feature = "serde")]
 use ::serde::{Deserialize, Serialize};
@@ -25,6 +27,133 @@ pub struct Layer {
     pub ty: LayerType,
     pub name: String,
     pub data: LayerData,
+    /// The file this layer was loaded from, for change detection and
+    /// verbatim saving.
+    source: Option<LayerSource>,
+}
+
+/// Original bytes of a loaded layer. The parsed state is not kept: change
+/// detection re-parses the bytes, which keeps memory at one copy.
+#[derive(Debug, Clone, PartialEq)]
+struct LayerSource {
+    bytes: Arc<[u8]>,
+    /// The type the bytes were parsed with.
+    parsed_as: LayerType,
+    /// The type parsing produced.
+    ty: LayerType,
+}
+
+impl Layer {
+    /// A layer that was not loaded from a file (always counts as modified).
+    pub fn new(ty: LayerType, name: impl Into<String>, data: impl Into<LayerData>) -> Self {
+        Layer {
+            ty,
+            name: name.into(),
+            data: data.into(),
+            source: None,
+        }
+    }
+
+    /// Parses a layer from `reader`, keeping the original bytes.
+    pub fn parse<T: Read>(
+        name: impl Into<String>,
+        ty: LayerType,
+        mut reader: BufReader<T>,
+    ) -> Result<Self, ParseError> {
+        let mut bytes = Vec::new();
+        reader
+            .read_to_end(&mut bytes)
+            .map_err(ParseError::ExcellonParseError)?;
+        let (parsed_ty, data) = LayerData::parse_bytes(ty, &bytes)?;
+        Ok(Layer {
+            ty: parsed_ty,
+            name: name.into(),
+            data,
+            source: Some(LayerSource {
+                bytes: bytes.into(),
+                parsed_as: ty,
+                ty: parsed_ty,
+            }),
+        })
+    }
+
+    /// The bytes this layer was loaded from, if any.
+    pub fn source_bytes(&self) -> Option<&[u8]> {
+        self.source.as_ref().map(|s| &*s.bytes)
+    }
+
+    /// Whether the layer differs from what was loaded: its type or any part
+    /// of its data (commands, apertures, macros, header) changed. Layers not
+    /// loaded from a file are always modified. This re-parses the source,
+    /// so callers checking often should cache the answer.
+    pub fn is_modified(&self) -> bool {
+        let Some(source) = &self.source else {
+            return true;
+        };
+        self.ty != source.ty
+            || LayerData::parse_bytes(source.parsed_as, &source.bytes)
+                .map_or(true, |(_, original)| original != self.data)
+    }
+
+    /// Interpretation diagnostics of the current data.
+    pub fn diagnostics(&self) -> LayerDiagnostics {
+        LayerDiagnostics::of(&self.data)
+    }
+
+    /// Writes the layer: the original bytes when unmodified, otherwise the
+    /// regenerated file. Fails with [`WriteError::Incomplete`] for a
+    /// modified layer with unresolved diagnostics unless
+    /// [`WriteOptions::allow_incomplete`] is set.
+    pub fn write_to<T: Write>(
+        &self,
+        writer: &mut BufWriter<T>,
+        options: &WriteOptions,
+    ) -> Result<(), WriteError> {
+        let plan = self.plan_write(options)?;
+        self.write_planned(writer, plan)
+    }
+
+    /// Decides how [`write_to`](Self::write_to) writes this layer, or why
+    /// it must not.
+    pub(crate) fn plan_write(&self, options: &WriteOptions) -> Result<WritePlan, WriteError> {
+        if self.source.is_some() && !self.is_modified() {
+            return Ok(WritePlan::Verbatim);
+        }
+        if !options.allow_incomplete {
+            let diagnostics = self.diagnostics();
+            if !diagnostics.is_complete() {
+                return Err(WriteError::Incomplete {
+                    layer: self.name.clone(),
+                    diagnostics: Box::new(diagnostics),
+                });
+            }
+        }
+        Ok(WritePlan::Regenerate)
+    }
+
+    pub(crate) fn write_planned<T: Write>(
+        &self,
+        writer: &mut BufWriter<T>,
+        plan: WritePlan,
+    ) -> Result<(), WriteError> {
+        match (plan, self.source_bytes()) {
+            (WritePlan::Verbatim, Some(bytes)) => {
+                writer.write_all(bytes)?;
+                writer.flush()?;
+            }
+            _ => self.data.write_to(writer)?,
+        }
+        Ok(())
+    }
+}
+
+/// How a layer is written, decided once before any file is opened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WritePlan {
+    /// Unmodified: the original bytes.
+    Verbatim,
+    /// Regenerated from the current data.
+    Regenerate,
 }
 
 // True when a file's first significant line is the Excellon header marker
@@ -58,17 +187,26 @@ impl LayerData {
         reader
             .read_to_end(&mut buf)
             .map_err(ParseError::ExcellonParseError)?;
+        Self::parse_bytes(ty, &buf)
+    }
+
+    /// [`parse`](Self::parse) from an in-memory file.
+    pub fn parse_bytes(ty: LayerType, buf: &[u8]) -> Result<(LayerType, LayerData), ParseError> {
+        if ty == LayerType::UndefinedGerber {
+            let layer = GerberLayerData::from_commands(BufReader::new(buf))?;
+            return Ok((layer.layer_type, LayerData::Gerber(layer)));
+        }
         // `LayerType::Drill` always tries Excellon; for Gerber-style extensions
         // we content-sniff so a misnamed drill/routing file (e.g. `*.gm2`)
         // still parses.
-        let try_excellon = ty == LayerType::Drill || looks_like_excellon(&buf);
+        let try_excellon = ty == LayerType::Drill || looks_like_excellon(buf);
         if try_excellon {
-            match parse_excellon(BufReader::new(Cursor::new(&buf))) {
+            match parse_excellon(BufReader::new(buf)) {
                 Ok(data) => return Ok((ty, LayerData::Excellon(data))),
                 Err(err) => debug!("Excellon parse failed for {ty:?}, trying Gerber: {err}"),
             }
         }
-        let gerber = GerberLayerData::from_type(ty, BufReader::new(Cursor::new(buf)))?;
+        let gerber = GerberLayerData::from_type(ty, BufReader::new(buf))?;
         Ok((gerber.layer_type, LayerData::Gerber(gerber)))
     }
 
@@ -504,11 +642,11 @@ impl From<GerberLayerData> for Layer {
     /// (e.g. `"gto"` for `SilkScreenTop`). Override `layer.name` afterwards
     /// if a specific filename is needed.
     fn from(data: GerberLayerData) -> Self {
-        Layer {
-            name: data.layer_type.file_ending().to_string(),
-            ty: data.layer_type,
-            data: LayerData::Gerber(data),
-        }
+        Layer::new(
+            data.layer_type,
+            data.layer_type.file_ending(),
+            LayerData::Gerber(data),
+        )
     }
 }
 
@@ -518,11 +656,11 @@ impl From<ExcellonLayerData> for Layer {
     /// The `name` is set to `"drl"`. Override `layer.name` afterwards if a
     /// specific filename is needed.
     fn from(data: ExcellonLayerData) -> Self {
-        Layer {
-            name: LayerType::Drill.file_ending().to_string(),
-            ty: LayerType::Drill,
-            data: LayerData::Excellon(data),
-        }
+        Layer::new(
+            LayerType::Drill,
+            LayerType::Drill.file_ending(),
+            LayerData::Excellon(data),
+        )
     }
 }
 
