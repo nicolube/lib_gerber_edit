@@ -10,9 +10,9 @@ use gerber_parser::GerberDoc;
 use gerber_parser::gerber_types::{
     Aperture, ApertureBlock, ApertureDefinition, ApertureMacro, Command, CommentContent,
     CoordinateFormat, CoordinateMode, CoordinateNumber, Coordinates, DCode, ExtendedCode,
-    FileAttribute, FunctionCode, GCode, GerberCode, GerberDate, GerberResult, ImageName, MCode,
-    MacroContent, MacroDecimal, Mirroring, Operation, Polarity, QuadrantMode, Rotation, Scaling,
-    StandardComment, StepAndRepeat, Unit, ZeroOmission,
+    FileAttribute, FunctionCode, GCode, GerberCode, GerberDate, GerberResult, ImageName,
+    ImagePolarity, MCode, MacroContent, MacroDecimal, Mirroring, Operation, Polarity, QuadrantMode,
+    Rotation, Scaling, StandardComment, StepAndRepeat, Unit, ZeroOmission,
 };
 use log::debug;
 use std::collections::{HashMap, HashSet};
@@ -190,6 +190,16 @@ impl GerberLayerData {
         self.commands.is_empty()
     }
 
+    /// The image is negative (`%IPNEG*%`). Loading keeps `IP` in the header.
+    pub fn is_negative(&self) -> bool {
+        self.header.iter().any(|c| {
+            matches!(
+                c,
+                Command::ExtendedCode(ExtendedCode::ImagePolarity(ImagePolarity::Negative))
+            )
+        })
+    }
+
     /// Unit the coordinates and apertures are stored in.
     pub(crate) fn unit(&self) -> &Unit {
         &self.unit
@@ -346,6 +356,9 @@ impl LayerMerge for GerberLayerData {
     /// changes when either side ends inside an open region or aperture
     /// block.
     fn check_merge(&self, other: &Self) -> Result<(), MergeError> {
+        if self.is_negative() != other.is_negative() {
+            return Err(MergeError::ImagePolarityMismatch);
+        }
         for (commands, side) in [
             (&self.commands, MergeSide::Receiver),
             (&other.commands, MergeSide::Source),
@@ -1417,6 +1430,17 @@ M02*
             Err(MergeError::OpenRegion(MergeSide::Source))
         );
         assert_eq!(a, before);
+    }
+
+    #[test]
+    fn test_merge_rejects_mixed_image_polarity() {
+        let mut positive = gerber("%ADD10C,0.5*%\nD10*\nX0Y0D03*\n");
+        let negative = gerber("%IPNEG*%\n%ADD10C,0.5*%\nD10*\nX0Y0D03*\n");
+        assert!(negative.is_negative() && !positive.is_negative());
+        assert_eq!(
+            positive.merge(&negative),
+            Err(MergeError::ImagePolarityMismatch)
+        );
     }
 
     #[test]

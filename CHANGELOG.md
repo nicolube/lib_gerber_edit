@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   D-codes instead of panicking, resets polarity / quadrant / LM-LR-LS at
   the seam, keeps the source's parse errors, and rejects layers ending
   inside an open region or aperture block.
+- Merging a negative (`%IPNEG*%`) image with a positive one is rejected
+  (`MergeError::ImagePolarityMismatch`); new `GerberLayerData::is_negative`.
 - Rotating a Gerber layer rotates macro apertures too (the angle is added
   to each primitive's rotation) instead of leaving them unrotated with a
   warning.

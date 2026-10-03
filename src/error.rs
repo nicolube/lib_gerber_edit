@@ -34,6 +34,8 @@ pub enum MergeError {
     OpenRegion(MergeSide),
     #[error("the {0} ends inside an open aperture block (AB)")]
     OpenBlock(MergeSide),
+    #[error("cannot merge a negative image (%IPNEG*%) with a positive one")]
+    ImagePolarityMismatch,
     #[error("layer '{layer}': {source}")]
     Layer {
         layer: String,
