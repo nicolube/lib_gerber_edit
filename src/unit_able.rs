@@ -89,8 +89,18 @@ impl UnitAble for Size {
 /// Variable definitions (`$n=...`) are never scaled: a variable may feed both a
 /// length and a rotation.
 fn scale_macro_decimal(dec: &MacroDecimal, factor: f64, op: &str) -> MacroDecimal {
+    map_macro_decimal(dec, |v| v * factor, op)
+}
+
+/// Applies `f` to a literal, or appends the Gerber arithmetic `op` (e.g.
+/// `x25.4`, `-90`) to a variable or expression.
+pub(crate) fn map_macro_decimal(
+    dec: &MacroDecimal,
+    f: impl Fn(f64) -> f64,
+    op: &str,
+) -> MacroDecimal {
     match dec {
-        MacroDecimal::Value(v) => MacroDecimal::Value(v * factor),
+        MacroDecimal::Value(v) => MacroDecimal::Value(f(*v)),
         MacroDecimal::Variable(n) => MacroDecimal::Expression(format!("${n}{op}")),
         MacroDecimal::Expression(e) => MacroDecimal::Expression(format!("({e}){op}")),
     }

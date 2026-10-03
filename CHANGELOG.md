@@ -32,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `get_corners` finds the real centre of single-quadrant (G74) arcs instead
   of adding the unsigned offsets.
 - Excellon arc lines (`G02X..Y..A..`) no longer fail to parse.
+- Rotating a Gerber layer rotates macro apertures too (the angle is added
+  to each primitive's rotation) instead of leaving them unrotated with a
+  warning.
 
 ## [0.6.1] - 2026-10-03
 

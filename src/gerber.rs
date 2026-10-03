@@ -1,6 +1,6 @@
 use crate::error::ParseError;
 use crate::gerber_types::{CoordinateOffset, InterpolationMode};
-use crate::unit_able::UnitAble;
+use crate::unit_able::{UnitAble, map_macro_decimal};
 use crate::{
     LayerCorners, LayerData, LayerMerge, LayerRotate, LayerScale, LayerStepAndRepeat,
     LayerTransform, LayerType, Pos,
@@ -11,9 +11,10 @@ use gerber_parser::gerber_types::{
     Aperture, ApertureDefinition, ApertureMacro, Command, CommentContent, CoordinateFormat,
     CoordinateMode, CoordinateNumber, Coordinates, DCode, ExtendedCode, FileAttribute,
     FunctionCode, GCode, GerberCode, GerberDate, GerberResult, ImageName, MCode, MacroContent,
-    Operation, Polarity, QuadrantMode, StandardComment, StepAndRepeat, Unit, ZeroOmission,
+    MacroDecimal, Operation, Polarity, QuadrantMode, StandardComment, StepAndRepeat, Unit,
+    ZeroOmission,
 };
-use log::{debug, warn};
+use log::debug;
 use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Read, Write};
 
@@ -763,7 +764,6 @@ fn rotate_gerber_apertures(apertures: &mut std::collections::HashMap<i32, Apertu
     }
     let odd = rot % 2 == 1;
     let degrees_ccw_delta = -90.0 * rot as f64;
-    let mut macros_skipped = 0usize;
     for ap in apertures.values_mut() {
         match ap {
             Aperture::Circle(_) => {}
@@ -776,16 +776,75 @@ fn rotate_gerber_apertures(apertures: &mut std::collections::HashMap<i32, Apertu
                 let cur = p.rotation.unwrap_or(0.0);
                 p.rotation = Some(cur + degrees_ccw_delta);
             }
-            Aperture::Macro(_, _) => {
-                macros_skipped += 1;
-            }
+            // Rotated through their macro bodies, see `rotate_gerber_macros`.
+            Aperture::Macro(_, _) => {}
         }
     }
-    if macros_skipped > 0 {
-        warn!(
-            "baking layer rotation: {macros_skipped} macro aperture(s) left un-rotated; \
-             their flashes may render incorrectly"
-        );
+}
+
+/// `-90`, `+180`: `value` with an explicit sign for appending to an expression.
+fn signed(value: f64) -> String {
+    if value < 0.0 {
+        format!("-{}", -value)
+    } else {
+        format!("+{value}")
+    }
+}
+
+/// Folds `delta` into an expression of the form `(<inner>)±k` (as written
+/// by an earlier rotation), keeping the offset within one turn.
+fn fold_rotation(expr: &str, delta: f64) -> Option<String> {
+    let close = expr.rfind(')')?;
+    let inner = expr.strip_prefix('(')?.get(..close - 1)?;
+    // `inner` must be one bracketed term, not `a)+(b` from `(a)+(b)-90`.
+    let balanced = inner.chars().try_fold(0i32, |depth, c| match c {
+        '(' => Some(depth + 1),
+        ')' => (depth > 0).then(|| depth - 1),
+        _ => Some(depth),
+    }) == Some(0);
+    if !balanced {
+        return None;
+    }
+    let offset: f64 = expr[close + 1..].trim_start_matches('+').parse().ok()?;
+    let total = (offset + delta).rem_euclid(360.0);
+    Some(if total == 0.0 {
+        inner.to_string()
+    } else {
+        format!("({inner}){}", signed(total - 360.0))
+    })
+}
+
+/// Rotates every macro by `rot` CW quarter-turns by adding the angle to each
+/// primitive's rotation parameter (primitives rotate about the macro
+/// origin, i.e. the flash point). All apertures of a layer rotate together,
+/// so the macro bodies are changed in place.
+fn rotate_gerber_macros(macros: &mut HashMap<String, Vec<MacroContent>>, rot: i32) {
+    if rot == 0 {
+        return;
+    }
+    let delta = -90.0 * rot as f64;
+    let add = |angle: &mut MacroDecimal| {
+        *angle = match angle {
+            // Fold an offset added by an earlier rotation, so repeated
+            // rotations do not nest expressions.
+            MacroDecimal::Expression(e) => match fold_rotation(e, delta) {
+                Some(folded) => MacroDecimal::Expression(folded),
+                None => map_macro_decimal(angle, |v| v + delta, &signed(delta)),
+            },
+            _ => map_macro_decimal(angle, |v| v + delta, &signed(delta)),
+        };
+    };
+    for content in macros.values_mut().flatten() {
+        match content {
+            MacroContent::Circle(c) => add(c.angle.get_or_insert(MacroDecimal::Value(0.0))),
+            MacroContent::VectorLine(p) => add(&mut p.angle),
+            MacroContent::CenterLine(p) => add(&mut p.angle),
+            MacroContent::Outline(p) => add(&mut p.angle),
+            MacroContent::Polygon(p) => add(&mut p.angle),
+            MacroContent::Moire(p) => add(&mut p.angle),
+            MacroContent::Thermal(p) => add(&mut p.angle),
+            MacroContent::VariableDefinition(_) | MacroContent::Comment(_) => {}
+        }
     }
 }
 
@@ -812,6 +871,7 @@ impl LayerRotate for GerberLayerData {
         let steps = steps.rem_euclid(4);
         rebase_gerber_commands(&mut self.commands, steps, offset.x, offset.y);
         rotate_gerber_apertures(&mut self.apertures, steps);
+        rotate_gerber_macros(&mut self.macros, steps);
     }
 }
 
@@ -908,7 +968,6 @@ impl Optimize for Command {
 mod tests {
     use super::*;
     use crate::Size;
-    use gerber_parser::gerber_types::MacroDecimal;
     use std::fs::File;
 
     #[test]
@@ -1157,7 +1216,65 @@ M02*
         Ok(())
     }
 
-    /// `FS..I..` incremental coordinates are resolved to absolute on load.
+    #[test]
+    fn test_rotate_macro_apertures() -> Result<(), Box<dyn std::error::Error>> {
+        // A macro with an off-centre dot at (1, 0) and a variable angle.
+        let gbr = "\
+%FSLAX46Y46*%
+%MOMM*%
+%AMDOT*
+1,1,0.2,1,0*
+21,1,1,0.5,0,0,$1*%
+%ADD10DOT,30*%
+D10*
+X0Y0D03*
+M02*
+";
+        let mut layer = GerberLayerData::from_type(LayerType::Top, BufReader::new(gbr.as_bytes()))?;
+        layer.rebase(1, &Pos::default());
+        let body = &layer.macros["DOT"];
+        let MacroContent::Circle(c) = &body[0] else {
+            panic!("expected a circle");
+        };
+        assert_eq!(c.angle, Some(MacroDecimal::Value(-90.0)));
+        let MacroContent::CenterLine(l) = &body[1] else {
+            panic!("expected a center line");
+        };
+        assert_eq!(l.angle, MacroDecimal::Expression("$1-90".into()));
+
+        // The dot ends up at (0, -1): a CW quarter turn about the flash.
+        let shapes = crate::flatten::aperture_shapes(&layer.apertures[&10], &layer.macros, 0.001)?;
+        let dot = shapes
+            .iter()
+            .map(|s| &s[0])
+            .find(|c| c.iter().all(|p| p[1] < -0.5))
+            .expect("dot below the origin");
+        let cx = dot.iter().map(|p| p[0]).sum::<f64>() / dot.len() as f64;
+        assert!(cx.abs() < 1e-3, "{cx}");
+
+        // Repeated rotations fold into one offset instead of nesting.
+        for steps in [1, 1] {
+            layer.rebase(steps, &Pos::default());
+        }
+        let MacroContent::CenterLine(l) = &layer.macros["DOT"][1] else {
+            panic!("expected a center line");
+        };
+        assert_eq!(l.angle, MacroDecimal::Expression("($1-90)-180".into()));
+        layer.rebase(1, &Pos::default());
+        let MacroContent::CenterLine(l) = &layer.macros["DOT"][1] else {
+            panic!("expected a center line");
+        };
+        assert_eq!(l.angle, MacroDecimal::Expression("($1-90)-270".into()));
+        assert_eq!(fold_rotation("(a)+(b)-90", -90.0), None);
+
+        // Round trip through text keeps the expression valid.
+        let mut out = BufWriter::new(Vec::new());
+        layer.write_to(&mut out)?;
+        let text = String::from_utf8(out.into_inner()?)?;
+        assert!(text.contains("$1-90"), "{text}");
+        Ok(())
+    }
+
     #[test]
     fn test_single_quadrant_arc_corners() -> Result<(), Box<dyn std::error::Error>> {
         // Quarter circle (1,0) -> (0,1) around the origin; G74 offsets are
@@ -1183,6 +1300,7 @@ M02*
         Ok(())
     }
 
+    /// `FS..I..` incremental coordinates are resolved to absolute on load.
     #[test]
     fn test_incremental_coordinates_resolved() -> Result<(), Box<dyn std::error::Error>> {
         let gbr = "\
