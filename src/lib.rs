@@ -72,6 +72,9 @@ pub mod gerber_ascii;
 pub mod layer;
 pub mod unit_able;
 
+/// This crate's version, e.g. for diagnostics reports.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub use gerber_parser;
 pub use gerber_parser::gerber_types;
 

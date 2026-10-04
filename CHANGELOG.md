@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `flatten::Path::sources`: the commands behind each segment (with the move
   that positioned it); a stroke's `source` starts at that move. `From`
   conversion from `flatten::Polarity` to the gerber-types polarity.
+- `lib_gerber_edit::VERSION`.
 - `Path::to_polyline(tolerance)` turns flattened paths (exact arcs) into
   points for renderers.
 - `fuzz/`: cargo-fuzz target that loads, flattens, writes and merges
