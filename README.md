@@ -7,7 +7,7 @@ All lengths in the public API are in **millimetres**.
 
 ```toml
 [dependencies]
-lib_gerber_edit = "0.6"
+lib_gerber_edit = "0.7"
 ```
 
 ---

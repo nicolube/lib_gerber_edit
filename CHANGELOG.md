@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-04
+
 ### Added
 - Export safety: layers loaded through `Board::load` / `from_folder` /
   `Layer::parse` keep their original bytes. `Layer::is_modified` reports
