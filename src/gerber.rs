@@ -135,7 +135,7 @@ impl GerberLayerData {
 
         // The X2 file function wins unless it is unspecific (e.g. KiCad's
         // `Other,User` courtyards), in which case the caller's type is kept.
-        let ty = LayerType::from_commands(&commands)
+        let ty = LayerType::from_commands(header.iter().chain(&commands))
             .filter(|t| *t != LayerType::UndefinedGerber)
             .unwrap_or(ty);
 
@@ -1690,6 +1690,21 @@ M02*
             .collect();
         functions.sort();
         assert!(functions[0].contains("SmdPad") && functions[1].contains("ViaPad"));
+    }
+
+    /// The X2 file function sits in the header, which `new` splits off
+    /// before the body; detection must still see it (`.gbr` fallback).
+    #[test]
+    fn test_layer_type_from_header_file_function() {
+        for attr in [
+            "%TF.FileFunction,Copper,L1,Top*%",
+            "G04 #@! TF.FileFunction,Copper,L1,Top*",
+        ] {
+            let gbr =
+                format!("{attr}\n%FSLAX46Y46*%\n%MOMM*%\n%ADD10C,0.1*%\nD10*\nX0Y0D03*\nM02*\n");
+            let layer = GerberLayerData::from_commands(BufReader::new(gbr.as_bytes())).unwrap();
+            assert_eq!(layer.layer_type, LayerType::Top, "{attr}");
+        }
     }
 
     #[test]
