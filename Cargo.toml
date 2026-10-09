@@ -4,7 +4,7 @@ description = "A library for manipulating extended Gerber (RS-274X) and Excellon
 repository = "https://github.com/nicolube/lib_gerber_edit"
 license-file = "LICENSE"
 exclude = ["*.pdf", ".github"]
-version = "0.7.0"
+version = "0.7.1"
 edition = "2024"
 
 [dependencies]

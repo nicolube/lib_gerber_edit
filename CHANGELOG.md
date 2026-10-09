@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-10-09
+
 ### Fixed
 - Layer type detection reads the X2 `FileFunction` again. 0.7.0 moved file
   attributes into the header before looking for it, so `.gbr` files (and
